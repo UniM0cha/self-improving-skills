@@ -1,0 +1,22 @@
+{
+  "name": "self-improving-skills",
+  "version": "0.6.0",
+  "description": "Hermes Agent-style self-improvement for Claude Code: automatically distill complex work into SKILL.md and improve skills over time.",
+  "author": {
+    "name": "이정윤"
+  },
+  "homepage": "https://github.com/UniM0cha/claude-self-improving-skills",
+  "repository": "https://github.com/UniM0cha/claude-self-improving-skills",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "self-improving",
+    "skills",
+    "learning-loop",
+    "hermes-agent",
+    "hooks",
+    "subagent",
+    "distillation",
+    "curator"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "claude-self-improving-skills",
+  "owner": {
+    "name": "이정윤"
+  },
+  "metadata": {
+    "description": "Hermes Agent-style self-improvement for Claude Code: distill complex work into reusable skills, validate edits, and curate stale knowledge."
+  },
+  "plugins": [
+    {
+      "name": "self-improving-skills",
+      "source": "./plugins/self-improving-skills",
+      "description": "Hermes Agent-style self-improvement for Claude Code: automatically distill complex work into SKILL.md and improve skills over time.",
+      "version": "0.6.0",
+      "author": {
+        "name": "이정윤"
+      },
+      "license": "MIT",
+      "category": "development"
+    }
+  ]
+}

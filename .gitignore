@@ -1,0 +1,15 @@
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Claude/self-improve runtime data (user-local, never commit)
+.claude/
+self-improve/
+*.log

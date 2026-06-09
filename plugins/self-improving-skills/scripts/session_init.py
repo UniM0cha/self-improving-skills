@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""SessionStart-hook logic for the self-improving-skills plugin.
+
+Injects a small amount of additionalContext at session start so the agent:
+  1. knows the self-improvement loop is active and how to feed it (the advisory
+     nudge — Hermes' SKILLS_GUIDANCE analogue),
+  2. is aware of how many learned skills already exist under ~/.claude/skills, and
+  3. is reminded to run /curate-skills when the learned-skill library has grown
+     and hasn't been consolidated in a while (the Hermes 7-day curator analogue,
+     here event-gated rather than wall-clock).
+
+Output contract: a SessionStart hook adds context by printing
+  {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}
+to stdout. Fails safe to silent (no context) on any error.
+
+Config:
+  SIS_CURATE_MIN_SKILLS  learned-skill count above which curation is suggested (default 8)
+  SIS_CURATE_INTERVAL_DAYS  days since last curation before re-suggesting (default 7)
+"""
+
+import json
+import os
+import sys
+import time
+from typing import NoReturn
+
+SKILLS_DIR = os.path.expanduser("~/.claude/skills")
+STATE_DIR = os.path.expanduser("~/.claude/self-improve")
+CURATOR_STATE = os.path.join(STATE_DIR, "curator_state.json")
+PROVENANCE_KEY = "self-improving-skills"  # marker we write into learned SKILL.md frontmatter
+
+
+def emit_context(text) -> NoReturn:
+    if text:
+        sys.stdout.write(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": text,
+            }
+        }, ensure_ascii=False))
+    sys.exit(0)
+
+
+def _int_env(name, default):
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _count_learned_skills():
+    """Count SKILL.md files under ~/.claude/skills that this plugin distilled."""
+    learned = 0
+    if not os.path.isdir(SKILLS_DIR):
+        return learned
+    for root, dirs, files in os.walk(SKILLS_DIR):
+        # don't descend into archives / vcs / caches
+        dirs[:] = [d for d in dirs if d not in (".archive", ".git", "__pycache__", "node_modules")]
+        if "SKILL.md" in files:
+            try:
+                with open(os.path.join(root, "SKILL.md"), encoding="utf-8", errors="ignore") as fh:
+                    head = fh.read(2048)
+                if PROVENANCE_KEY in head:
+                    learned += 1
+            except Exception:
+                pass
+    return learned
+
+
+def _read_curator_state():
+    try:
+        with open(CURATOR_STATE, encoding="utf-8") as fh:
+            d = json.load(fh)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_curator_state(state):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = CURATOR_STATE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, CURATOR_STATE)
+    except Exception:
+        pass
+
+
+def _curation_status(learned_count):
+    """'seed' (first ever — defer), 'due' (run now), or 'idle'."""
+    state = _read_curator_state()
+    if "last_run" not in state:
+        return "seed"
+    if learned_count < _int_env("SIS_CURATE_MIN_SKILLS", 8):
+        return "idle"
+    interval = _int_env("SIS_CURATE_INTERVAL_DAYS", 7) * 86400
+    try:
+        last = float(state.get("last_run", 0))
+    except (TypeError, ValueError):
+        last = 0.0
+    return "due" if (time.time() - last) >= interval else "idle"
+
+
+def _run_curator(state, lines):
+    """Run the deterministic time-based transition pass inline and report it."""
+    summary = None
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import curator_transitions
+        summary = curator_transitions.run(dry_run=False)
+    except Exception:
+        summary = None
+    state["last_run"] = time.time()
+    state["run_count"] = int(state.get("run_count", 0)) + 1
+    if summary:
+        na, ns, nr = len(summary["archived"]), len(summary["stale"]), len(summary["reactivated"])
+        state["last_summary"] = {"archived": na, "stale": ns, "reactivated": nr}
+        if na or ns or nr:
+            lines.append(
+                "[큐레이터] 미사용 스킬 자동 정리 실행: stale {0}개, 아카이브 {1}개, 재활성화 {2}개. "
+                "아카이브된 스킬은 ~/.claude/skills/.archive/ 로 이동(삭제 아님, /restore-skill 로 복구). "
+                "세부 리포트는 ~/.claude/self-improve/logs/curator/. "
+                "중복 스킬의 의미 기반 통합이 필요하면 /curate-skills 를 실행하세요.".format(ns, na, nr)
+            )
+        else:
+            lines.append("[큐레이터] 정기 점검 완료 — 정리할 미사용 스킬이 없습니다.")
+    _write_curator_state(state)
+
+
+def main():
+    try:
+        sys.stdin.read()  # drain payload; we don't need its fields
+    except Exception:
+        pass
+
+    try:
+        learned = _count_learned_skills()
+    except Exception:
+        emit_context(None)
+
+    lines = [
+        "[self-improving-skills] 자기개선 루프가 활성화되어 있습니다.",
+        "복잡한 작업·까다로운 디버깅·새로운 기법 발견을 끝낸 뒤, 그것이 재사용 가능하다면 "
+        "Task 도구로 self-improving-skills:skill-distiller 서브에이전트(정확한 subagent_type 은 "
+        "\"self-improving-skills:skill-distiller\" — 플러그인 네임스페이스 접두사를 빼면 호출이 실패함)를 "
+        "호출하거나 /distill-skill 로 ~/.claude/skills 에 "
+        "SKILL.md 를 만들어(또는 기존 스킬을 patch 하여) 다음 세션의 자신에게 남기세요. "
+        "복잡한 구간을 그냥 종료하려 하면 Stop 훅이 한 번 상기시켜 줍니다.",
+    ]
+    if learned:
+        lines.append("현재 학습된 스킬 {0}개가 ~/.claude/skills 에 누적되어 있습니다.".format(learned))
+
+    try:
+        status = _curation_status(learned)
+        if status == "seed":
+            # First ever tick: seed the clock and DEFER (never curate on install).
+            _write_curator_state({"last_run": time.time(), "run_count": 0})
+        elif status == "due":
+            _run_curator(_read_curator_state(), lines)
+    except Exception:
+        pass
+
+    emit_context("\n".join(lines))
+
+
+if __name__ == "__main__":
+    main()
