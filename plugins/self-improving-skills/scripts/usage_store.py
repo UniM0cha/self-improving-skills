@@ -270,15 +270,31 @@ def set_fields(name, **fields):
         _save(data)
 
 
-def forget_missing(existing_names):
+def forget_missing(existing_names, grace_hours=24):
     """Drop records for skills whose dir no longer exists — EXCEPT archived ones
-    (those live under .archive/ and must keep their record so /restore works)."""
+    (those live under .archive/ and must keep their record so /restore works).
+
+    A record is not dropped on first sight: it is marked `missing_since` and
+    only deleted if STILL missing `grace_hours` later. A skill that is merely
+    mid-move (e.g. a parallel session's archive between dir-move and
+    state-write) would otherwise lose its accumulated counters."""
     existing = set(existing_names)
     with _Lock():
         data = load()
         changed = False
+        now = datetime.now(timezone.utc)
         for name, rec in list(_records(data)):
-            if name not in existing and rec.get("state") != "archived":
+            if name in existing:
+                if rec.pop("missing_since", None) is not None:
+                    changed = True  # reappeared — clear the marker
+                continue
+            if rec.get("state") == "archived":
+                continue
+            since = _parse_ts(rec.get("missing_since"), None) if rec.get("missing_since") else None
+            if since is None:
+                rec["missing_since"] = now_iso()
+                changed = True
+            elif (now - since).total_seconds() >= grace_hours * 3600:
                 del data[name]
                 changed = True
         if changed:

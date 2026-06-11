@@ -168,12 +168,21 @@ def _seed_created_by(name):
 
 
 def _capture_telemetry(rows, session_id):
-    """Best-effort: bump use/view/patch counters for learned skills from new
+    """Best-effort: bump use/view counters for learned skills from new
     transcript rows (since this session's last processed offset). Signals
     (verified against real transcripts):
       - Skill tool, input.skill (namespace-stripped) matches a learned skill -> use
       - Read of a ~/.claude/skills/**/SKILL.md                                -> view
-      - Write/Edit/MultiEdit of the same                                      -> patch
+
+    NOT counted here:
+      - patch: counted by the PostToolUse validator instead — it also fires
+        inside subagents, so the background distiller's edits (which live in a
+        separate agent transcript this scanner never reads) keep the skill's
+        idle clock fresh. Counting patches here too would double-count.
+      - view during a maintenance segment: if this segment ran /curate-skills
+        or /curator-status, their bulk SKILL.md reads are library maintenance,
+        not usage — counting them would reset every stale candidate's idle
+        clock on each curation pass and the time-based pruning would never fire.
     """
     if usage_store is None:
         return
@@ -202,6 +211,21 @@ def _capture_telemetry(rows, session_id):
                 cb_cache[name] = _seed_created_by(name)
             return cb_cache[name]
 
+        # Maintenance segment? (/curate-skills or /curator-status ran) —
+        # suppress view events so curation can't reset idle clocks.
+        maintenance = False
+        for row in rows[offset:]:
+            for tu in _tool_uses(row):
+                if tu.get("name") == "Skill":
+                    raw_inp = tu.get("input")
+                    inp = raw_inp if isinstance(raw_inp, dict) else {}
+                    sk = str(inp.get("skill", "")).split(":")[-1]
+                    if sk in ("curate-skills", "curator-status"):
+                        maintenance = True
+                        break
+            if maintenance:
+                break
+
         for row in rows[offset:]:
             for tu in _tool_uses(row):
                 name = tu.get("name")
@@ -211,14 +235,10 @@ def _capture_telemetry(rows, session_id):
                     sk = str(inp.get("skill", "")).split(":")[-1]
                     if sk in learned:
                         events.append((sk, "use", _cb(sk)))
-                elif name == "Read":
+                elif name == "Read" and not maintenance:
                     sn = _skill_name_from_path(inp.get("file_path"))
                     if sn in learned:
                         events.append((sn, "view", _cb(sn)))
-                elif name in EDIT_TOOLS:
-                    sn = _skill_name_from_path(inp.get("file_path"))
-                    if sn in learned:
-                        events.append((sn, "patch", _cb(sn)))
     try:
         usage_store.apply_events(events, session_id, len(rows))
     except Exception:
@@ -345,12 +365,14 @@ def main():
                 '(반드시 백그라운드로 — 그래야 증류가 도는 동안 사용자 입력이 막히지 않습니다), '
                 "이 세션에서 얻은 재사용 가능한 기법·패턴·해결책을 ~/.claude/skills 의 "
                 "SKILL.md 로 캡처하세요.\n\n"
+                "서브에이전트를 호출할 때 이 세션의 transcript 경로도 프롬프트에 포함하세요 "
+                "(증류 근거를 직접 읽을 수 있게): {tpath}\n\n"
                 "원칙:\n"
                 "- 이미 관련된 기존 스킬이 있으면 새로 만들지 말고 그 SKILL.md 를 patch 하세요.\n"
                 "- 한 번 쓰고 버릴 일회성 작업(특정 PR·특정 버그·환경 의존적 우회)이라면 "
                 "캡처하지 말고 그대로 종료하세요.\n"
                 "- 증류가 불필요하다고 판단되면, 그 이유를 사용자에게 한 줄로 알린 뒤 종료하세요."
-            ).format(calls=total_calls, edits=file_edits))
+            ).format(calls=total_calls, edits=file_edits, tpath=path))
         if core_touched:
             parts.append(
                 "이번 구간이 self-improving-skills 코어 소스를 직접 수정했습니다. "

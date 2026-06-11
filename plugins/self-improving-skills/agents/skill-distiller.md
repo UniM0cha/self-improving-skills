@@ -21,9 +21,12 @@ never one-off task narratives. A wrong or noisy skill is worse than no skill.
 
 The caller (the Stop-hook nudge or a user running `/distill-skill`) will have left
 the relevant work in the conversation that delegated to you, or will summarize it.
-If you need more detail about what just happened, read the recent transcript and
-the files that were changed. Start by understanding: **what did this session
-figure out that was non-obvious and would save time if it recurred?**
+If the caller included a **transcript path** (the Stop-hook nudge passes one),
+read its tail directly — it is a JSONL file whose assistant rows carry
+`message.content[]` tool_use/text blocks — to ground yourself in what actually
+happened instead of relying on the summary alone. Also read the files that were
+changed. Start by understanding: **what did this session figure out that was
+non-obvious and would save time if it recurred?**
 
 ## Decision procedure (follow in order — prefer the earliest that applies)
 

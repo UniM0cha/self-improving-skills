@@ -162,20 +162,32 @@ def _stamp_provenance(path, text):
         pass
 
 
-def _seed_usage(file_path, text):
-    """Seed a usage record (created_at) for a newly-written learned skill, tagging
-    provenance so the curator only ever touches agent-distilled skills.
-    A skill carrying `origin: distilled` (written by skill-distiller) is
-    created_by=agent; a hand-authored SKILL.md is created_by=user."""
+def _record_patch(file_path, text, payload):
+    """Record a patch event for this learned-skill write (seeding the usage
+    record on first sight).
+
+    Patch counting lives HERE (PostToolUse) and not in the Stop-hook transcript
+    scan, because this hook also fires inside subagents: the background
+    skill-distiller's edits land in a separate agent transcript the Stop
+    scanner never reads — counting there would let an actively-maintained
+    skill look idle and get auto-archived.
+
+    created_by precedence for seeding: the writing agent's type (hook payload
+    `agent_type` — present when the hook fires inside a subagent), then an
+    explicit `origin: distilled` marker in the written text, else "user"."""
     if usage_store is None:
         return
     norm = str(file_path).replace("\\", "/")
     name = os.path.basename(os.path.dirname(norm))
     if not name:
         return
-    created_by = "agent" if re.search(r"origin\s*:\s*distilled", text) else "user"
+    agent_type = str(payload.get("agent_type") or "")
+    if "skill-distiller" in agent_type or re.search(r"origin\s*:\s*distilled", text):
+        created_by = "agent"
+    else:
+        created_by = "user"
     try:
-        usage_store.seed_if_missing(name, created_by)
+        usage_store.apply_events([(name, "patch", created_by)])
     except Exception:
         pass
 
@@ -202,7 +214,7 @@ def main():
     problems = _validate(text)
     if not problems:
         _stamp_provenance(file_path, text)
-        _seed_usage(file_path, text)
+        _record_patch(file_path, text, payload)
         silent()
 
     # 구조가 깨짐 → 편집 직전 백업이 있으면 롤백(트랜잭션 안전), 없으면(신규) 경고만.
