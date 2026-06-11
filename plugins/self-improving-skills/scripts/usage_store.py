@@ -18,7 +18,7 @@ Schema mirrors Hermes tools/skill_usage.py `_empty_record`. One JSON file:
         "use_count": int, "view_count": int, "patch_count": int,
         "last_used_at": iso|null, "last_viewed_at": iso|null, "last_patched_at": iso|null,
         "created_at": iso, "state": "active|stale|archived",
-        "pinned": bool, "created_by": "agent|user", "absorbed_into": str|null
+        "pinned": bool, "created_by": "agent|user|team", "absorbed_into": str|null
       }, ...
     }
 

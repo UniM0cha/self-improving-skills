@@ -197,7 +197,7 @@ def run(dry_run=False):
     learned = _learned_names()
     summary = {
         "stale": [], "archived": [], "reactivated": [],
-        "skipped_pinned": [], "skipped_user": [],
+        "skipped_pinned": [], "skipped_user": [], "skipped_team": [],
         "stale_days": stale_days, "archive_days": archive_days,
         "dry_run": dry_run, "ran_at": now.replace(microsecond=0).isoformat(),
     }
@@ -212,7 +212,10 @@ def run(dry_run=False):
     for name in sorted(learned):
         rec = records.get(name, {})
         if rec.get("created_by", "agent") != "agent":
-            summary["skipped_user"].append(name)
+            # team-synced skills have an external upstream owner (the team
+            # repo) and are NEVER curation-eligible — Hermes hub rule.
+            key = "skipped_team" if rec.get("created_by") == "team" else "skipped_user"
+            summary[key].append(name)
             continue
         if rec.get("pinned") or _frontmatter_pinned(name):
             summary["skipped_pinned"].append(name)
@@ -254,8 +257,9 @@ def _write_report(summary):
             "- thresholds: stale>={0}d, archive>={1}d".format(summary["stale_days"], summary["archive_days"]),
             "- archived: {0} | stale: {1} | reactivated: {2}".format(
                 len(summary["archived"]), len(summary["stale"]), len(summary["reactivated"])),
-            "- skipped (pinned): {0} | skipped (user-authored): {1}".format(
-                len(summary["skipped_pinned"]), len(summary["skipped_user"])),
+            "- skipped (pinned): {0} | skipped (user-authored): {1} | skipped (team): {2}".format(
+                len(summary["skipped_pinned"]), len(summary["skipped_user"]),
+                len(summary.get("skipped_team", []))),
             "",
         ]
         if summary["archived"]:

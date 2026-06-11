@@ -19,6 +19,7 @@
 - **VALIDATE + 트랜잭션 편집** (v0.5.0) — `PreToolUse` 훅이 학습 SKILL.md를 편집 **직전에 백업**하고, `PostToolUse` 훅이 편집 후 frontmatter·크기를 검증. 편집이 구조를 깨뜨리면 **백업에서 자동 롤백**(Hermes `_patch_skill`의 backup→re-validate→rollback 이식)하고 모델에 다시 시도하도록 알림. 정상 편집은 무간섭. 처음 만들어진 학습 스킬엔 `metadata.provenance` 자동 부착 + usage 레코드 시딩(티어링: distiller=agent, 사용자 직접=user).
 - **CURATE** (v0.3.0) — **시간기반 미사용 스킬 자동 정리**. `SessionStart` 훅이 큐레이션 주기(기본 7일)가 됐는지 확인하고, 됐으면 `curator_transitions.py`를 **인라인 자동 실행**: 마지막 활동(use/view/patch) 기준 **30일 미사용→stale, 90일→archive**(`.archive/` 로 이동, 삭제 아님). 변경 전 tar.gz 스냅샷을 뜨고, 다시 쓰이면 stale→active로 재활성화. **pin된 스킬과 사용자 작성(`created_by:user`) 스킬은 절대 건드리지 않음.** 의미 기반 중복 통합은 `/curate-skills`(LLM, 병합 시 `absorbed_into` 기록)가 담당. 수동 제어 커맨드: `/curator-status`(상태·통계), `/prune-skills`(N일 미사용 일괄, dry-run), `/archive-skill`(단일), `/pin-skill`(보호), `/restore-skill`(복구).
 - **수동 트리거** — `/distill-skill` 로 언제든 증류를 직접 실행.
+- **TEAM SHARE** (v0.9.0) — **팀 스킬 공유(origin-hash 동기화)**. 팀 repo는 하드코딩되지 않으며 각 사용자가 `~/.claude/self-improve/team_config.json` 에 지정합니다(대부분 private repo, gh 인증 경유). **보내기** `/share-skill <name>`: 정적 스캔(시크릿·로컬경로·인젝션) → LLM 일반화(취향 제거, 기법만) → diff 확인 → 격리 clone 에서 팀 repo `skills/<name>/` 로 PR(머지는 사람). **받기** `/sync-team-skills`: 매 실행 fresh shallow clone → plan(read-only) 표 확인 → apply. **origin-hash 규칙이 개인화를 구조적으로 보호합니다**: 설치 시점의 디렉토리 내용 해시를 매니페스트(`team_sync.json`)에 기록하고, ▸ 내 사본이 그대로면 자동 업데이트 ▸ 내가 수정했으면 절대 덮지 않음(diverged 안내 1회) ▸ 내가 삭제/아카이브하면 재설치 안 함(suppression, `--reinstall` 로 복귀) ▸ 동명 개인 스킬은 충돌 스킵. 설치 전 정적 스캔 실패 시 격리(`team_quarantine/`). 내가 공유한 PR이 머지되면 다음 sync 가 개인 원본을 백업 후 팀 관리본으로 전환(adopt). 팀 스킬은 `created_by: team` 으로 기록되어 **개인 큐레이터가 절대 정리하지 않습니다**(소유자는 팀 repo — Hermes hub 원칙). per-skill 스테이징 트랜잭션 + 크래시 자가치유(local==team 이면 origin 재기록) 포함.
 - **UPSTREAM 기여** (v0.6.0) — 플러그인 *자기 자신*의 개선을 닫는 두 단계. **L1(감지·알림)**: `Stop` 훅이 이번 구간에서 self-improving-skills 코어 소스(`plugins/self-improving-skills/**`)를 편집했음을 감지하면, skills 증류와 별개로 "코어를 건드렸으니 upstream에 PR로 제안 가능"을 알립니다(정보 제공만, 자동 행동 없음). **L2(opt-in 자동 PR)**: `/propose-plugin-improvement` 가 격리된 fresh clone에서 변경을 재현해 upstream(`samton-inc/samton-claude`)에 PR을 엽니다. **설계 불변식**: 자동 push·머지 없음(PR까지만, 머지는 사람) / `SIS_PLUGIN_PR=1` opt-in 기본 OFF / fresh clone + commit 전 index 초기화 + 화이트리스트 서브트리만 스테이징(그 밖 경로가 staged되면 PR 중단)으로 transcript·로컬 비밀 유입 차단 / write 권한 없으면 fork 경유. distiller(skills 전담)와 책임이 분리되어 있습니다 — distiller는 PR을 만들지 않습니다.
 
 ## 흐름
@@ -49,6 +50,8 @@ skill-distiller 서브에이전트 (격리 컨텍스트)
 | `SIS_STALE_AFTER_DAYS` | `30` | 마지막 활동 후 이 일수 미사용 시 stale 마킹 |
 | `SIS_ARCHIVE_AFTER_DAYS` | `90` | 마지막 활동 후 이 일수 미사용 시 `.archive/` 로 이동 |
 | `SIS_PLUGIN_PR` | (없음) | `1` 로 설정하면 `/propose-plugin-improvement` 의 L2 자동 PR을 활성화. 미설정이면 코어 변경 L1 알림만 동작하고 PR은 만들지 않음 |
+| `SIS_TEAM_SKILLS_REPO` | (없음) | 팀 스킬 repo override (`owner/name`). 기본은 `~/.claude/self-improve/team_config.json` 의 `repo` — 둘 다 없으면 공유 커맨드는 안내 후 중단 |
+| `SIS_TEAM_SYNC_REMIND_DAYS` | `7` | 마지막 팀 동기화 후 이 일수가 지나면 SessionStart 가 /sync-team-skills 를 권유(네트워크 0, 1일 1회) |
 
 `~/.claude/settings.json` 의 `env` 블록이나 셸 환경에서 조정합니다.
 
@@ -83,22 +86,30 @@ self-improving-skills/
 │   └── validate-skill.sh     # PostToolUse 래퍼 (검증 + 롤백)
 ├── scripts/
 │   ├── analyze_turn.py        # 복잡도 측정 + block/approve 결정 + usage 캡처 + 코어 변경 감지(L1)
-│   ├── usage_store.py         # 스킬 사용 telemetry 저장소 (atomic+flock)
-│   ├── curator_transitions.py # 시간기반 stale→archive 상태머신 (+restore/prune)
+│   ├── usage_store.py         # 스킬 사용 telemetry 저장소 (atomic+flock, _meta prune)
+│   ├── curator_transitions.py # 시간기반 stale→archive 상태머신 (+restore/prune, use_count 보호)
 │   ├── curator_backup.py      # 변경 전 tar.gz 스냅샷
 │   ├── backup_skill.py        # PreToolUse: SKILL.md 편집 직전 백업
-│   ├── session_init.py        # 자기개선 안내 + 큐레이터 자동 실행
-│   ├── validate_skill.py      # SKILL.md 검증 + 롤백 + provenance + usage 시딩
-│   └── propose_plugin_pr.py   # 코어 개선 PR plumbing (prepare/submit, fresh clone, fork 경유)
+│   ├── session_init.py        # 자기개선 안내 + 큐레이터 자동 실행 + 팀 동기화 리마인더
+│   ├── validate_skill.py      # SKILL.md 검증 + 롤백 + provenance + patch 집계 + diverged 안내
+│   ├── propose_pr.py          # 범용 PR plumbing (fresh clone, 화이트리스트, fork 경유)
+│   ├── propose_plugin_pr.py   # 코어 기여 어댑터 (SIS_PLUGIN_PR 게이트)
+│   ├── team_config.py         # 팀 repo 사용자 설정 로드 (하드코딩 없음)
+│   ├── team_manifest.py       # 동기화 매니페스트 + 결정적 디렉토리 해시
+│   ├── team_sync.py           # 동기화 엔진 (plan/apply/--reinstall, 상태머신)
+│   └── scan_skill.py          # 정적 스캐너 (시크릿·인젝션·위험명령, 설치 게이트/공유 리포트)
 ├── agents/
 │   └── skill-distiller.md     # 격리 리뷰어 (patch>create 우선순위)
+├── tests/                     # pytest 스위트 (uv run --with pytest -- pytest tests/)
 └── commands/
     ├── distill-skill.md       # 수동 증류 트리거
-    ├── curate-skills.md       # 의미 기반 중복 통합 (LLM, absorbed_into 기록)
+    ├── curate-skills.md       # umbrella 통합 패스 (LLM, absorbed_into 기록)
     ├── curator-status.md      # 루프 상태·사용 통계 조회
     ├── prune-skills.md        # N일 미사용 일괄 아카이브 (dry-run)
     ├── archive-skill.md       # 단일 스킬 수동 아카이브
     ├── pin-skill.md           # 스킬 pin (자동 정리 보호)
     ├── restore-skill.md       # 아카이브 복구
+    ├── share-skill.md         # 학습 스킬을 팀 repo에 PR로 공유 (sanitize→일반화→PR)
+    ├── sync-team-skills.md    # 팀 스킬 동기화 (origin-hash, plan→apply)
     └── propose-plugin-improvement.md  # 코어 개선을 upstream에 PR 제안 (L2, opt-in)
 ```
