@@ -206,9 +206,10 @@ def record_nudge(session_id, row_count):
     with _Lock():
         data = load()
         meta = data.setdefault("_meta", {})
-        nudges = meta.setdefault("nudges", {})
+        # prune BEFORE inserting so the entry just written always survives
+        nudges = _prune_session_map(meta.get("nudges") or {}, legacy_key="r")
         nudges[session_id] = {"r": int(row_count), "t": now_iso()}
-        meta["nudges"] = _prune_session_map(nudges, legacy_key="r")
+        meta["nudges"] = nudges
         _save(data)
 
 
@@ -239,9 +240,10 @@ def apply_events(events, session_id=None, new_offset=None):
                 rec["state"] = "active"
         if session_id is not None and new_offset is not None:
             meta = data.setdefault("_meta", {})
-            offsets = meta.setdefault("offsets", {})
+            # prune BEFORE inserting so the entry just written always survives
+            offsets = _prune_session_map(meta.get("offsets") or {})
             offsets[session_id] = {"o": int(new_offset), "t": now_iso()}
-            meta["offsets"] = _prune_session_map(offsets)
+            meta["offsets"] = offsets
         _save(data)
 
 

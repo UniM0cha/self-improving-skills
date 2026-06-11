@@ -45,10 +45,13 @@ non-obvious and would save time if it recurred?**
    point to it from the SKILL.md body with one line. Keep SKILL.md bodies small.
 
 4. **Create a NEW class-level skill — last resort only.** Only when nothing above
-   fits. **Before creating, check for a name collision** — `ls ~/.claude/skills/`
+   fits. **Before creating, check for collisions and overlap** — `ls ~/.claude/skills/`
    (and `~/.claude/skills/.archive/`). If a skill (or archived skill) of that name
    already exists, do NOT overwrite it: either patch the existing one (step 1) or
-   pick a more specific class-level name. Then create `~/.claude/skills/<name>/SKILL.md`.
+   pick a more specific class-level name. Also scan the **available-skills list in
+   your own context** (installed plugin skills): if an installed plugin already
+   covers this technique, don't duplicate it — capture only the delta beyond what
+   that plugin teaches, or nothing. Then create `~/.claude/skills/<name>/SKILL.md`.
    The name MUST be class-level and reusable:
    - GOOD: `pyannote-speaker-diarization`, `react-effect-cleanup`, `shadcn-v4-migration`
    - BAD: anything tied to one instance — a PR number, an error string, a codename,
@@ -75,8 +78,8 @@ Declining is a valid, common outcome.
 
 ```markdown
 ---
-name: <lowercase-hyphenated, class-level, <=64 chars>
-description: <one situation-first sentence: "Use this when ... ", <=1024 chars>
+name: <lowercase-hyphenated, class-level, <=64 chars, no leading/trailing/double hyphens>
+description: <third-person situation match, ideally <=500 chars>
 metadata:
   provenance: self-improving-skills
   origin: distilled
@@ -94,11 +97,27 @@ metadata:
 <edge cases, what bit us, what to verify>
 ```
 
-Write the **description as a situation match** ("이런 상황에서 사용한다"), not a
-defensive mandate. A good description is the difference between a skill that
-auto-triggers and one that sits unused. Keep the `metadata.provenance:
-self-improving-skills` line — it marks the skill as agent-distilled so
-`/curate-skills` and the session counter can find it.
+**Description rules** (this is what decides whether the skill ever triggers —
+ported from Anthropic's skill-creator guidance):
+
+- Write in the **third person**: "Use this when ..." / "This skill should be
+  used when ..." — never "You should load this when ...".
+- Include **concrete trigger phrases** a user would actually say and concrete
+  situations ("transcript에 'mem mem mem' 같은 동일 토큰이 반복될 때" beats
+  "transcription issues").
+- Err on the side of **slightly pushy** — under-triggering is the common
+  failure, not over-triggering. Name the adjacent situations where it applies.
+- Aim for **<=500 chars**: every learned skill's description is injected into
+  every future session's system prompt, so length is a permanent context cost
+  (the validator warns above 500).
+
+**Body rules**: imperative/infinitive mood ("To fix X, do Y" — not "You should
+do Y"). Keep the body focused (roughly 1,500–2,000 words max); move long
+references, API dumps, and reproduction recipes into the skill's `references/`
+subdir and point to them with one line.
+
+Keep the `metadata.provenance: self-improving-skills` line — it marks the skill
+as agent-distilled so `/curate-skills` and the session counter can find it.
 
 ## After writing
 

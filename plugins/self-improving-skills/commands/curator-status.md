@@ -23,4 +23,4 @@ ls -1 ~/.claude/skills/.archive/ 2>/dev/null || echo "(없음)"
 
 `$ARGUMENTS` 가 특정 스킬 이름이면 그 스킬의 상세만 보여주세요.
 
-> 임계값: 마지막 활동 후 SIS_STALE_AFTER_DAYS(기본 30일) → stale, SIS_ARCHIVE_AFTER_DAYS(기본 90일) → archive. pin된 스킬과 사용자 작성(created_by=user) 스킬은 자동 정리 대상이 아닙니다.
+> 임계값: 마지막 활동 후 SIS_STALE_AFTER_DAYS(기본 30일) → stale, SIS_ARCHIVE_AFTER_DAYS(기본 90일) → archive. 단 **누적 use_count ≥ 3인 스킬은 archive 임계가 2배**(검증된 스킬은 천천히 늙음). pin된 스킬과 사용자 작성(created_by=user) 스킬은 자동 정리 대상이 아닙니다.

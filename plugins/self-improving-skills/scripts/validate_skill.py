@@ -42,9 +42,15 @@ BACKUP_DIR = os.path.expanduser("~/.claude/self-improve/skill_backups")
 
 MAX_NAME = 64
 MAX_DESCRIPTION = 1024
+DESC_WARN_LEN = 500  # soft advisory only — every session pays this in context
 MAX_CONTENT = 100000
 PROVENANCE_VALUE = "self-improving-skills"
+# Hard charset rule (a violation BLOCKS + rolls back the edit).
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+# Official quick_validate also forbids trailing/consecutive hyphens — enforced
+# as a non-blocking advisory only, so pre-existing learned skills with such
+# names don't fall into an edit→rollback loop.
+NAME_STRICT_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 
 def silent() -> NoReturn:
@@ -141,6 +147,28 @@ def _validate(text):
     return problems
 
 
+def _advisory(text):
+    """Non-blocking quality advisories for a VALID skill (never trips rollback)."""
+    fm, _body = _split_frontmatter(text)
+    if fm is None:
+        return None
+    notes = []
+    desc = _scalar(fm, "description") or ""
+    if len(desc) > DESC_WARN_LEN:
+        notes.append("description이 {0}자입니다. 학습 스킬의 description은 앞으로 모든 "
+                     "세션의 시스템 프롬프트에 실리므로 길이가 곧 상시 컨텍스트 비용입니다. "
+                     "트리거 문구는 보존하면서 {1}자 이하로 압축을 고려하세요."
+                     .format(len(desc), DESC_WARN_LEN))
+    name = _scalar(fm, "name") or ""
+    if name and NAME_RE.match(name) and not NAME_STRICT_RE.match(name):
+        notes.append("`name`에 선행·후행·연속 하이픈이 있습니다({0}). 공식 스킬 규약 위반이니 "
+                     "디렉토리명과 함께 단어-사이-하이픈 형태로 바꾸는 것을 권장합니다."
+                     .format(name))
+    if notes:
+        return "[self-improving-skills] 참고:\n- " + "\n- ".join(notes)
+    return None
+
+
 def _stamp_provenance(path, text):
     """Inject a provenance metadata marker if none exists. Best-effort."""
     if PROVENANCE_VALUE in text:
@@ -215,6 +243,9 @@ def main():
     if not problems:
         _stamp_provenance(file_path, text)
         _record_patch(file_path, text, payload)
+        warning = _advisory(text)
+        if warning:
+            feedback(warning)
         silent()
 
     # 구조가 깨짐 → 편집 직전 백업이 있으면 롤백(트랜잭션 안전), 없으면(신규) 경고만.

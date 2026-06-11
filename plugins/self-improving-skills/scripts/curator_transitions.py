@@ -124,6 +124,24 @@ def _idle_days(rec, now):
     return (now - anchor).days
 
 
+def _use_count(rec):
+    """Defensive int read — one malformed counter must not break a whole run."""
+    try:
+        return int(rec.get("use_count", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _archive_days_for(rec, base_days):
+    """Proven skills age slower: lifetime use_count >= 3 doubles the archive
+    threshold (stale marking is unchanged). Guards rarely-but-decisively used
+    skills from a fixed 90-day guillotine — the failure mode Hermes hit when
+    its curator archived the load-bearing 'plan' skill (#41817)."""
+    if _use_count(rec) >= 3:
+        return base_days * 2
+    return base_days
+
+
 def archive_one(name, absorbed_into=None, dry_run=False):
     """Manually archive a single skill (user-initiated). `absorbed_into` records
     the umbrella it was merged into (vs None = plain prune). Returns a result dict."""
@@ -159,7 +177,8 @@ def prune_idle(days, dry_run=True):
             continue
         idle = _idle_days(rec, now)
         if idle >= days:
-            candidates.append({"name": name, "idle_days": idle})
+            candidates.append({"name": name, "idle_days": idle,
+                               "use_count": _use_count(rec)})
     result = {"days": days, "dry_run": dry_run, "candidates": candidates}
     if not dry_run and candidates:
         if curator_backup is not None:
@@ -201,7 +220,7 @@ def run(dry_run=False):
         if rec.get("state") == "archived":
             continue
         idle = _idle_days(rec, now)
-        if idle >= archive_days:
+        if idle >= _archive_days_for(rec, archive_days):
             summary["archived"].append({"name": name, "idle_days": idle})
             if not dry_run:
                 ensure_backup()
