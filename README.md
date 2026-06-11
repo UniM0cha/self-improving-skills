@@ -1,8 +1,10 @@
 # Claude Self-Improving Skills
 
+**English** | [한국어](README.ko.md)
+
 > **Hermes Agent-style self-improvement for Claude Code.**
 >
-> It turns hard-won workflow lessons into reusable `SKILL.md` files, validates skill edits, and curates stale knowledge so Claude Code can get better across sessions instead of starting from zero every time.
+> It turns hard-won workflow lessons into reusable `SKILL.md` files, validates skill edits, curates stale knowledge, and (since v0.9.0) lets a team share learned skills through a git repo — without ever overwriting anyone's personal customizations.
 
 Claude Code already has hooks, subagents, slash commands, and skills. This plugin wires those primitives into a closed learning loop inspired by [Nous Research Hermes Agent](https://github.com/NousResearch/hermes-agent):
 
@@ -21,16 +23,44 @@ Hermes Agent has first-class procedural memory through skills and a curator loop
 - **Write or patch** `~/.claude/skills/<name>/SKILL.md` through a dedicated subagent.
 - **Validate and roll back** malformed skill edits automatically.
 - **Track usage** so stale generated skills can be archived instead of piling up forever.
+- **Share** proven skills with your team — opt-in, review-gated, personalization always wins.
 
 ## Features
 
-- **Automatic distillation nudge**: a `Stop` hook blocks once when enough tool work and file edits happened since the last distillation.
-- **Dedicated distiller subagent**: prefers patching existing skills, then umbrella skills, then creating a new class-level skill only when it is truly reusable.
-- **Skill edit safety**: pre-edit backups, post-edit validation, provenance stamping, and rollback on malformed `SKILL.md`.
-- **Usage telemetry**: tracks skill use/view/patch counts in `~/.claude/self-improve/skill_usage.json`.
-- **Curator loop**: marks old unused agent-created skills stale and archives them recoverably under `~/.claude/skills/.archive/`.
-- **Manual commands**: `/distill-skill`, `/curate-skills`, `/curator-status`, `/prune-skills`, `/archive-skill`, `/pin-skill`, `/restore-skill`, `/propose-plugin-improvement`.
+- **Automatic distillation nudge**: a `Stop` hook blocks **once per segment of work** when enough tool calls and file edits accumulated since the last distillation. A declined nudge stays declined; it only re-fires after another threshold of *new* work. The nudge includes the transcript path so the background distiller can read what actually happened.
+- **Dedicated distiller subagent**: prefers patching existing skills, then umbrella skills, then adding reference files, and creates a new class-level skill only as a last resort. Skill descriptions follow Anthropic's skill-creator guidance (third-person situation match with concrete trigger phrases).
+- **Skill edit safety**: pre-edit backups, post-edit validation, provenance stamping, and automatic rollback on malformed `SKILL.md`. Non-blocking quality advisories (e.g. over-long descriptions that cost context in every session).
+- **Accurate usage telemetry**: skill use/view/patch counts in `~/.claude/self-improve/skill_usage.json`. Patch counting runs in the `PostToolUse` hook so edits made by *background* subagents are captured too, and bulk reads during curation never reset a skill's idle clock.
+- **Curator loop**: unused agent-created skills go stale after 30 days and are archived (recoverably) after 90. Skills proven by repeated use (`use_count >= 3`) age at half speed. The LLM curation pass (`/curate-skills`) is an umbrella-building consolidation modeled on Hermes' curator prompt — plan first, apply only after approval.
+- **Team skill sharing (v0.9.0)**: share learned skills through a team git repo with **origin-hash sync** — see below.
+- **Manual commands**: `/distill-skill`, `/curate-skills`, `/curator-status`, `/prune-skills`, `/archive-skill`, `/pin-skill`, `/restore-skill`, `/share-skill`, `/sync-team-skills`, `/propose-plugin-improvement`.
 - **Fail-safe hooks**: hook errors approve the original action instead of breaking your Claude Code session.
+
+## Team skill sharing
+
+Point the plugin at your team's (usually private) skills repo — nothing is hardcoded:
+
+```jsonc
+// ~/.claude/self-improve/team_config.json
+{
+  "repo": "your-org/your-team-skills",
+  "subdir": "skills"
+}
+```
+
+- **Publish** with `/share-skill <name>`: the skill is scanned (secrets, local paths, injection patterns), generalized (techniques stay, personal style is stripped), shown to you as a diff, and opened as a PR against the team repo. A human merges.
+- **Receive** with `/sync-team-skills`: a fresh shallow clone, a read-only plan you confirm, then per-skill transactional apply.
+
+The **origin-hash rule** makes sharing safe by construction. Each installed team skill records a deterministic content hash at install time:
+
+| Your local copy | Sync behavior |
+|---|---|
+| Untouched (hash == origin) | Auto-updated to the team's latest |
+| **Customized by you** | **Never overwritten** — a one-time "diverged" notice; share your version back if you want |
+| Deleted or archived by you | Never re-installed (until `--reinstall <name>`) |
+| Name collides with a personal skill | Skipped with a warning |
+
+Skills are *instructions to an agent* — i.e. a prompt-injection vector — so every write of team content (first install **and** later updates) passes a static scanner (secrets, destructive commands, injection markers, symlinks, hidden files, size caps). Blocked content lands in quarantine, never in `~/.claude/skills`. Team skills are marked `created_by: team` and are never touched by your personal curator: their owner is the team repo.
 
 ## Install
 
@@ -54,7 +84,9 @@ All configuration is optional. Set these in your shell or in `~/.claude/settings
 | `SIS_CURATE_MIN_SKILLS` | `8` | Minimum learned-skill count before automatic curation runs |
 | `SIS_CURATE_INTERVAL_DAYS` | `7` | Automatic curator interval |
 | `SIS_STALE_AFTER_DAYS` | `30` | Mark unused agent-created skills as stale after this many inactive days |
-| `SIS_ARCHIVE_AFTER_DAYS` | `90` | Move unused agent-created skills to `.archive/` after this many inactive days |
+| `SIS_ARCHIVE_AFTER_DAYS` | `90` | Move unused agent-created skills to `.archive/` after this many inactive days (doubled for skills with `use_count >= 3`) |
+| `SIS_TEAM_SKILLS_REPO` | unset | Team repo override (`owner/name`); the primary source is `~/.claude/self-improve/team_config.json` |
+| `SIS_TEAM_SYNC_REMIND_DAYS` | `7` | Days after the last team sync before SessionStart suggests `/sync-team-skills` (no network, once a day) |
 | `SIS_PLUGIN_PR` | unset | Set to `1` to allow the opt-in upstream PR helper for this plugin's own source |
 
 ## How it works
@@ -66,7 +98,7 @@ Stop hook parses the transcript and usage offsets
   ↓
 If the work was complex and not yet distilled, it returns a one-time block
   ↓
-Claude delegates to self-improving-skills:skill-distiller
+Claude delegates to self-improving-skills:skill-distiller (background)
   ↓
 The distiller patches or creates a reusable SKILL.md under ~/.claude/skills
   ↓
@@ -84,10 +116,12 @@ The learned skills live in your user directory, not inside the plugin. Updating 
 plugins/self-improving-skills/
   .claude-plugin/plugin.json             # plugin metadata
   hooks/                                 # Stop, SessionStart, PreToolUse, PostToolUse wrappers
-  scripts/                               # transcript analysis, telemetry, curator, validator, PR helper
+  scripts/                               # transcript analysis, telemetry, curator, validator,
+                                         #   team sync engine, security scanner, PR plumbing
   agents/skill-distiller.md              # subagent prompt for skill distillation
   commands/                              # slash commands exposed by the plugin
-  README.md                              # detailed design notes
+  tests/                                 # pytest suite (uv run --with pytest -- pytest tests/)
+  README.md                              # detailed design notes (Korean)
 ```
 
 ## Honest limitations
@@ -95,10 +129,7 @@ plugins/self-improving-skills/
 - Claude Code does not provide Hermes Agent's free background daemon thread. Distillation uses a visible/billable subagent turn.
 - This plugin handles procedural memory (`SKILL.md`), not factual memory. Claude Code's native memory features or separate memory plugins should handle facts about you or your projects.
 - The curator is intentionally conservative: it archives only agent-created learned skills and keeps recoverable backups.
-
-## Korean summary
-
-Claude Code에 Hermes Agent식 자기개선 루프를 붙이는 플러그인입니다. 복잡한 작업이 끝나면 그 과정에서 재사용 가능한 절차를 `~/.claude/skills/<name>/SKILL.md`로 증류하고, 다음 세션에서 Claude Code가 그 스킬을 다시 발견해 활용하게 만듭니다. 검증·롤백·사용량 추적·오래된 스킬 아카이브까지 포함합니다.
+- Team sync is PR-gated by design, not real-time. A shared real-time skill store would let one compromised session inject instructions into every teammate's agent; the human review gate **is** the security boundary.
 
 ## License
 
