@@ -8,7 +8,7 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/distill-nudge.sh",
-            "timeout": 15000
+            "timeout": 15
           }
         ]
       }
@@ -20,7 +20,7 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/session-init.sh",
-            "timeout": 10000
+            "timeout": 10
           }
         ]
       }
@@ -32,7 +32,7 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/backup-skill.sh",
-            "timeout": 10000
+            "timeout": 10
           }
         ]
       }
@@ -44,7 +44,7 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/validate-skill.sh",
-            "timeout": 10000
+            "timeout": 10
           }
         ]
       }

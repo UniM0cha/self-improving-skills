@@ -2,7 +2,7 @@
 description: self-improving-skills 코어 개선을 upstream 리포에 PR로 제안한다 (opt-in, fresh clone, 자동 머지 없음)
 ---
 
-self-improving-skills **플러그인 자체**의 개선을 upstream(`UniM0cha/claude-self-improving-skills`)에 PR로 제안하세요.
+self-improving-skills **플러그인 자체**의 개선을 upstream(`samton-inc/samton-claude`)에 PR로 제안하세요.
 
 이것은 자기개선 루프의 **코어 기여 단계(L2)**입니다. distiller가 `~/.claude/skills`에 증류하는 것과 달리, 이건 플러그인 *소스*를 고쳐 upstream에 올립니다 — 격리된 fresh clone에서만 작업하고, **PR까지만(자동 push·머지 없음, 머지는 maintainer)**, write 권한이 없으면 자동으로 fork를 경유합니다.
 

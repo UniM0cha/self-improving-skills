@@ -10,7 +10,10 @@ Schema mirrors Hermes tools/skill_usage.py `_empty_record`. One JSON file:
 
     ~/.claude/self-improve/skill_usage.json
     {
-      "_meta": { "offsets": { "<session_id>": <int lines already processed> } },
+      "_meta": {
+        "offsets": { "<session_id>": {"o": <rows processed>, "t": "<iso>"} },
+        "nudges":  { "<session_id>": {"r": <rows at last nudge>, "t": "<iso>"} }
+      },
       "<skill-name>": {
         "use_count": int, "view_count": int, "patch_count": int,
         "last_used_at": iso|null, "last_viewed_at": iso|null, "last_patched_at": iso|null,
@@ -44,6 +47,11 @@ KINDS = {
     "view": ("view_count", "last_viewed_at"),
     "patch": ("patch_count", "last_patched_at"),
 }
+
+# _meta session maps (offsets, nudges) would otherwise grow one entry per
+# session forever (observed: 106 entries in 8 days). Prune on every write.
+META_MAX_ENTRIES = 100
+META_MAX_AGE_DAYS = 30
 
 
 def now_iso():
@@ -130,8 +138,78 @@ def _records(data):
         yield k, v
 
 
+def _parse_ts(value, fallback):
+    """Parse an ISO timestamp defensively; tz-naive becomes UTC."""
+    try:
+        ts = datetime.fromisoformat(str(value))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts
+    except Exception:
+        return fallback
+
+
+def _prune_session_map(m, legacy_key="o"):
+    """Normalize+prune a _meta per-session map. Values are {"t": iso, ...};
+    legacy bare-int values are grandfathered as {legacy_key: v, "t": now}
+    (no rescan/double count). Entries older than META_MAX_AGE_DAYS or beyond
+    the newest META_MAX_ENTRIES are dropped. Returns the pruned dict."""
+    now = datetime.now(timezone.utc)
+    norm = {}
+    for sid, v in m.items():
+        if isinstance(v, dict):
+            norm[sid] = v
+        elif isinstance(v, int):
+            norm[sid] = {legacy_key: v, "t": now_iso()}
+    kept = {}
+    for sid, v in norm.items():
+        # Unparseable "t" -> treat as fresh for the age filter (keep), but as
+        # oldest for the size cap below (drop first) — never above real entries.
+        if (now - _parse_ts(v.get("t"), now)).days < META_MAX_AGE_DAYS:
+            kept[sid] = v
+    if len(kept) > META_MAX_ENTRIES:
+        oldest_sentinel = datetime.min.replace(tzinfo=timezone.utc)
+        newest = sorted(kept.items(),
+                        key=lambda kv: _parse_ts(kv[1].get("t"), oldest_sentinel),
+                        reverse=True)
+        kept = dict(newest[:META_MAX_ENTRIES])
+    return kept
+
+
 def get_offset(session_id):
-    return int(load().get("_meta", {}).get("offsets", {}).get(session_id, 0))
+    v = load().get("_meta", {}).get("offsets", {}).get(session_id, 0)
+    if isinstance(v, dict):
+        v = v.get("o", 0)
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+def get_nudge_row(session_id):
+    """Transcript row count at the moment this session was last nudged (0 if
+    never). The Stop analyzer counts work only past max(anchor, this) so one
+    block per segment of work — a declined nudge is not re-raised every turn."""
+    v = load().get("_meta", {}).get("nudges", {}).get(session_id)
+    if isinstance(v, dict):
+        try:
+            return int(v.get("r", 0))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def record_nudge(session_id, row_count):
+    """Remember that the Stop hook just nudged this session at `row_count`."""
+    if not session_id:
+        return
+    with _Lock():
+        data = load()
+        meta = data.setdefault("_meta", {})
+        nudges = meta.setdefault("nudges", {})
+        nudges[session_id] = {"r": int(row_count), "t": now_iso()}
+        meta["nudges"] = _prune_session_map(nudges, legacy_key="r")
+        _save(data)
 
 
 def apply_events(events, session_id=None, new_offset=None):
@@ -162,7 +240,8 @@ def apply_events(events, session_id=None, new_offset=None):
         if session_id is not None and new_offset is not None:
             meta = data.setdefault("_meta", {})
             offsets = meta.setdefault("offsets", {})
-            offsets[session_id] = int(new_offset)
+            offsets[session_id] = {"o": int(new_offset), "t": now_iso()}
+            meta["offsets"] = _prune_session_map(offsets)
         _save(data)
 
 

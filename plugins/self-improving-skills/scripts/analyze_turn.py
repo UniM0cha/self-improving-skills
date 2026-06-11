@@ -23,6 +23,11 @@ sibling dev-log hook (which never fired across 396 real transcripts):
     Claude Code actually parses), NOT on stderr with exit 2.
   * `stop_hook_active` is honored as a loop guard so we never re-block our own
     block.
+  * A nudge is raised at most ONCE per segment of work: the row count at block
+    time is persisted (usage_store `_meta.nudges`) and counting resumes from
+    there, so a legitimately-declined nudge ("일회성이라 캡처 안 함") is not
+    re-raised on every subsequent Stop — only after another threshold's worth
+    of NEW work. The same start row bounds the core-touch (L1) advisory.
   * Any error fails safe to APPROVE — the hook must never wedge a session shut.
 
 Config:
@@ -33,6 +38,7 @@ Config:
 
 import json
 import os
+import re
 import sys
 from typing import NoReturn
 
@@ -140,6 +146,27 @@ def _skill_name_from_path(file_path):
     return os.path.basename(os.path.dirname(norm)) or None
 
 
+def _seed_created_by(name):
+    """created_by for a usage record being seeded from a telemetry event.
+
+    Only an explicit distilled/provenance marker in the skill's OWN frontmatter
+    makes it "agent" (curation-eligible). Everything else defaults to "user" so
+    merely OBSERVING a hand-authored skill being read can never put it on the
+    curator's auto-archive track — provenance is decided by explicit markers,
+    never inferred from location or usage (Hermes skill_usage rule)."""
+    try:
+        safe = os.path.basename(str(name))  # never let a name traverse out
+        with open(os.path.join(SKILLS_DIR, safe, "SKILL.md"),
+                  encoding="utf-8", errors="ignore") as fh:
+            head = fh.read(2048)
+        if re.search(r"origin\s*:\s*distilled", head) or \
+                "provenance: self-improving-skills" in head:
+            return "agent"
+    except Exception:
+        pass
+    return "user"
+
+
 def _capture_telemetry(rows, session_id):
     """Best-effort: bump use/view/patch counters for learned skills from new
     transcript rows (since this session's last processed offset). Signals
@@ -166,6 +193,15 @@ def _capture_telemetry(rows, session_id):
 
     events = []
     if learned:
+        # created_by only matters when an event SEEDS a missing record; compute
+        # it from the skill's own frontmatter (cached per name), default "user".
+        cb_cache = {}
+
+        def _cb(name):
+            if name not in cb_cache:
+                cb_cache[name] = _seed_created_by(name)
+            return cb_cache[name]
+
         for row in rows[offset:]:
             for tu in _tool_uses(row):
                 name = tu.get("name")
@@ -174,15 +210,15 @@ def _capture_telemetry(rows, session_id):
                 if name == "Skill":
                     sk = str(inp.get("skill", "")).split(":")[-1]
                     if sk in learned:
-                        events.append((sk, "use", "agent"))
+                        events.append((sk, "use", _cb(sk)))
                 elif name == "Read":
                     sn = _skill_name_from_path(inp.get("file_path"))
                     if sn in learned:
-                        events.append((sn, "view", "agent"))
+                        events.append((sn, "view", _cb(sn)))
                 elif name in EDIT_TOOLS:
                     sn = _skill_name_from_path(inp.get("file_path"))
                     if sn in learned:
-                        events.append((sn, "patch", "agent"))
+                        events.append((sn, "patch", _cb(sn)))
     try:
         usage_store.apply_events(events, session_id, len(rows))
     except Exception:
@@ -221,10 +257,11 @@ def main():
     except Exception:
         approve()
 
+    session_id = str(payload.get("session_id") or os.path.basename(path))
+
     # Telemetry capture (best-effort, isolated): record skill use/view/patch from
     # new transcript rows. Never let this affect the nudge decision below.
     try:
-        session_id = str(payload.get("session_id") or os.path.basename(path))
         _capture_telemetry(rows, session_id)
     except Exception:
         pass
@@ -254,11 +291,24 @@ def main():
             elif name in EDIT_TOOLS and _is_skill_path(inp.get("file_path")):
                 anchor = i
 
-    # Count tool calls and real file edits since the anchor.
+    # Nudge-once guard: resume counting from the last nudge's row count, so a
+    # nudge the agent already saw (and possibly declined for good reason) is
+    # not re-raised every turn — only after another threshold of NEW work.
+    nudged_rows = 0
+    if usage_store is not None:
+        try:
+            nudged_rows = usage_store.get_nudge_row(session_id)
+        except Exception:
+            nudged_rows = 0
+    if nudged_rows > len(rows):
+        nudged_rows = 0  # stale marker (transcript rotated/shrank)
+    start = max(anchor + 1, nudged_rows)
+
+    # Count tool calls and real file edits since the anchor/last nudge.
     total_calls = 0
     file_edits = 0
     core_touched = False  # did this segment edit the plugin's OWN source?
-    for row in rows[anchor + 1:]:
+    for row in rows[start:]:
         for tu in _tool_uses(row):
             total_calls += 1
             name = tu.get("name")
@@ -291,7 +341,8 @@ def main():
                 "아직 스킬로 증류되지 않았습니다. 종료하기 전에 /distill-skill 을 실행하거나 "
                 'self-improving-skills:skill-distiller 서브에이전트'
                 '(subagent_type="self-improving-skills:skill-distiller" — 플러그인 네임스페이스 '
-                '접두사를 빼면 호출이 실패함)를 호출해, '
+                '접두사를 빼면 호출이 실패함)를 Task(또는 Agent) 도구의 run_in_background=true 로 호출해 '
+                '(반드시 백그라운드로 — 그래야 증류가 도는 동안 사용자 입력이 막히지 않습니다), '
                 "이 세션에서 얻은 재사용 가능한 기법·패턴·해결책을 ~/.claude/skills 의 "
                 "SKILL.md 로 캡처하세요.\n\n"
                 "원칙:\n"
@@ -305,13 +356,20 @@ def main():
                 "이번 구간이 self-improving-skills 코어 소스를 직접 수정했습니다. "
                 "이건 ~/.claude/skills 증류와는 별개입니다 — 플러그인 코어 개선은 사람이 "
                 "유지보수하는 영역이므로, 다음 중 하나로 처리하세요:\n"
-                "- 이 개선을 upstream(UniM0cha/claude-self-improving-skills)에 기여하려면 "
+                "- 이 개선을 upstream(samton-inc/samton-claude)에 기여하려면 "
                 "/propose-plugin-improvement 를 실행하세요. fresh clone 에서 변경을 재현해 "
                 "PR 로 제안합니다(write 권한이 없으면 fork 경유). "
                 "opt-in: 환경변수 SIS_PLUGIN_PR=1 이 설정돼 있어야 실제 PR 을 만듭니다.\n"
                 "- 또는 사람이 직접 브랜치/PR 로 처리하세요.\n"
                 "자동 push·머지는 하지 않습니다. PR 제안까지만이며, 머지는 사람이 결정합니다."
             )
+        # Remember this nudge so the same segment never re-triggers (the agent
+        # may legitimately decline; that decision must stick).
+        if usage_store is not None:
+            try:
+                usage_store.record_nudge(session_id, len(rows))
+            except Exception:
+                pass
         emit({"decision": "block", "reason": "\n\n———\n\n".join(parts)})
 
     approve()
