@@ -11,7 +11,7 @@
       "name": "self-improving-skills",
       "source": "./plugins/self-improving-skills",
       "description": "Hermes Agent-style self-improvement for Claude Code: automatically distill complex work into SKILL.md and improve skills over time.",
-      "version": "0.9.0",
+      "version": "0.9.1",
       "author": {
         "name": "이정윤"
       },

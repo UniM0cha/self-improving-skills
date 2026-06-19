@@ -163,6 +163,7 @@ def main():
         pass
 
     _team_sync_reminder(lines)
+    _auto_mode_perm_hint(lines)
 
     emit_context("\n".join(lines))
 
@@ -202,6 +203,52 @@ def _team_sync_reminder(lines):
                 "[팀 스킬] 마지막 동기화 후 {0}일 경과 — /sync-team-skills 로 "
                 "팀 업데이트를 확인하세요.".format(
                     "{0}+".format(interval) if fired[0] is None else int(fired[0])))
+    except Exception:
+        pass
+
+
+def _auto_mode_perm_hint(lines):
+    """auto mode 인데 distiller 백그라운드 호출을 허용하는 규칙이 없으면, 에이전트에게
+    1회 안내를 주입한다.
+
+    Why: permissions.defaultMode=="auto" 에서는 백그라운드 도구 호출이 권한 프롬프트를
+    띄울 수 없어 자동 거부된다. 그래서 증류 nudge 가 skill-distiller 를
+    run_in_background 로 호출해도 조용히 차단되고, 자동 증류 루프가 돌지 않는다.
+    플러그인은 설치만으로 사용자 권한을 열 수 없으므로(보안 경계), 차단을 만났을 때
+    사용자에게 1회 규칙 추가를 안내하도록 에이전트에 알려 둔다.
+
+    로컬 파일만 읽는다(네트워크 0). user settings 와 settings.local 만 확인하는
+    휴리스틱 — 프로젝트/엔터프라이즈 settings 나 CLI 플래그로 mode/allow 가 설정된
+    경우는 놓칠 수 있으나, 가장 흔한 케이스(전역 auto mode)는 잡는다. 규칙이 이미
+    감지되면 침묵한다."""
+    try:
+        default_mode = None
+        has_rule = False
+        for fname in ("settings.json", "settings.local.json"):
+            p = os.path.expanduser(os.path.join("~/.claude", fname))
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    d = json.load(fh)
+            except Exception:
+                continue
+            perms = d.get("permissions", {}) if isinstance(d, dict) else {}
+            if not isinstance(perms, dict):
+                continue
+            if perms.get("defaultMode"):
+                default_mode = perms.get("defaultMode")
+            allow = perms.get("allow") or []
+            if isinstance(allow, list) and any("skill-distiller" in str(r) for r in allow):
+                has_rule = True
+        if default_mode == "auto" and not has_rule:
+            lines.append(
+                "[권한] 이 머신은 permissions.defaultMode=\"auto\" 인데 skill-distiller 를 "
+                "허용하는 allow 규칙이 없습니다. auto mode 에서는 백그라운드 도구 호출이 "
+                "프롬프트를 띄울 수 없어 자동 거부되므로, 증류 서브에이전트의 백그라운드 "
+                "호출이 차단됩니다. 증류가 막히면 사용자에게 ~/.claude/settings.json 의 "
+                "permissions.allow 에 다음 5줄 추가를 안내하세요(1회로 영구 해결): "
+                "Agent(self-improving-skills:skill-distiller), Read(~/.claude/skills/**), "
+                "Edit(~/.claude/skills/**), Write(~/.claude/skills/**), Read(~/.claude/projects/**)."
+            )
     except Exception:
         pass
 

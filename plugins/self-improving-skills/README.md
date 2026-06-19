@@ -55,6 +55,28 @@ skill-distiller 서브에이전트 (격리 컨텍스트)
 
 `~/.claude/settings.json` 의 `env` 블록이나 셸 환경에서 조정합니다.
 
+## auto mode 사용자 — 권한 허용 (자동 증류가 막힐 때)
+
+`~/.claude/settings.json` 의 `permissions.defaultMode` 가 `"auto"` 면, **백그라운드 도구 호출은 권한 프롬프트를 띄울 수 없어 자동 거부(auto-deny)** 됩니다. 그래서 증류 nudge 가 `skill-distiller` 를 `run_in_background:true` 로 호출해도 그 자리에서 차단되어, 자동 증류 루프가 돌지 않습니다.
+
+플러그인은 **설치만으로 사용자 권한을 열 수 없습니다** — plugin.json/marketplace 에 권한 선언 필드가 없고, 플러그인이 ship 할 수 있는 default settings 도 `permissions` 를 제외합니다. 이는 의도된 보안 경계입니다(설치=권한 자동부여가 되면 악성 플러그인이 위험). 대신 **사용자가 1회** 다음 규칙을 `permissions.allow` 에 추가하면 영구 해결됩니다:
+
+```jsonc
+"Agent(self-improving-skills:skill-distiller)",  // 서브에이전트 기동
+"Read(~/.claude/skills/**)",                      // 기존 스킬 읽기/검색
+"Edit(~/.claude/skills/**)",                      // SKILL.md patch
+"Write(~/.claude/skills/**)",                     // 새 SKILL.md 작성
+"Read(~/.claude/projects/**)"                     // transcript(증류 근거) 읽기
+```
+
+- 서브에이전트는 **네임스페이스 포함 전체 이름**(`self-improving-skills:skill-distiller`)으로 매칭됩니다. 짧은 이름(`skill-distiller`)은 매칭되지 않습니다.
+- `Agent(...)` 는 서브에이전트 "기동"만 허용합니다. 그 안에서 일어나는 Read/Edit/Write 는 **각각 별도로** 권한 평가되므로(백그라운드라 프롬프트 불가 → 명시 없으면 또 auto-deny), 위 경로 규칙이 함께 필요합니다.
+- 홈 경로는 `~` 를 그대로 씁니다. 절대경로로 쓰려면 `Write(//Users/me/.claude/skills/**)` 처럼 **앞에 슬래시 2개**가 필요합니다(`/Users/...` 는 프로젝트 루트 상대로 해석됨).
+- distiller 가 보조 `Bash`(검증·grep)를 쓰다 막히면, 백그라운드 에이전트 로그의 deny 를 보고 좁은 `Bash(...)` 규칙을 점진 추가하세요.
+- `defaultMode` 가 `"default"`(대화형 승인) 면 포그라운드 호출은 프롬프트로 승인할 수 있으나, **백그라운드 호출은 mode 와 무관하게 사전 allow 가 필요**합니다.
+
+auto mode + 규칙 부재가 감지되면 SessionStart 안내가 이 사실을 한 번 일러줍니다.
+
 ## 설계 원칙 — dev-log의 실패에서 배운 가드레일
 
 이 플러그인은 같은 마켓플레이스의 `dev-log` 훅이 **396개 실제 세션에서 단 한 번도 발동하지 않은** 원인 분석 위에 만들어졌습니다. 그 7대 실수를 모두 막았습니다:
