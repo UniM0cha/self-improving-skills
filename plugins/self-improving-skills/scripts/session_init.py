@@ -163,7 +163,7 @@ def main():
         pass
 
     _team_sync_reminder(lines)
-    _auto_mode_perm_hint(lines)
+    _perm_block_recovery_hint(lines)
 
     emit_context("\n".join(lines))
 
@@ -207,50 +207,31 @@ def _team_sync_reminder(lines):
         pass
 
 
-def _auto_mode_perm_hint(lines):
-    """auto mode 인데 distiller 백그라운드 호출을 허용하는 규칙이 없으면, 에이전트에게
-    1회 안내를 주입한다.
+def _perm_block_recovery_hint(lines):
+    """증류 백그라운드 호출이 권한 분류기에 막혔을 때의 복구 절차를 1회 주입한다.
 
-    Why: permissions.defaultMode=="auto" 에서는 백그라운드 도구 호출이 권한 프롬프트를
-    띄울 수 없어 자동 거부된다. 그래서 증류 nudge 가 skill-distiller 를
-    run_in_background 로 호출해도 조용히 차단되고, 자동 증류 루프가 돌지 않는다.
-    플러그인은 설치만으로 사용자 권한을 열 수 없으므로(보안 경계), 차단을 만났을 때
-    사용자에게 1회 규칙 추가를 안내하도록 에이전트에 알려 둔다.
+    Why: 과거엔 settings.json 의 permissions.defaultMode 를 읽어 "auto 모드라서
+    차단된다"고 미리 경고했으나 — 차단 여부는 settings 하나로 판단할 수 없다.
+    top-level skipAutoPermissionPrompt/skipDangerousModePermissionPrompt 플래그,
+    bypassPermissions/acceptEdits 모드, 프로젝트·엔터프라이즈 settings, CLI 플래그,
+    런타임 모드 변경 등 변수가 많아, defaultMode=="auto" 만 보고 "차단됩니다"라고
+    단정하면 false negative 가 난다(실제로 에이전트가 시도조차 없이 증류를 보류함).
 
-    로컬 파일만 읽는다(네트워크 0). user settings 와 settings.local 만 확인하는
-    휴리스틱 — 프로젝트/엔터프라이즈 settings 나 CLI 플래그로 mode/allow 가 설정된
-    경우는 놓칠 수 있으나, 가장 흔한 케이스(전역 auto mode)는 잡는다. 규칙이 이미
-    감지되면 침묵한다."""
-    try:
-        default_mode = None
-        has_rule = False
-        for fname in ("settings.json", "settings.local.json"):
-            p = os.path.expanduser(os.path.join("~/.claude", fname))
-            try:
-                with open(p, encoding="utf-8") as fh:
-                    d = json.load(fh)
-            except Exception:
-                continue
-            perms = d.get("permissions", {}) if isinstance(d, dict) else {}
-            if not isinstance(perms, dict):
-                continue
-            if perms.get("defaultMode"):
-                default_mode = perms.get("defaultMode")
-            allow = perms.get("allow") or []
-            if isinstance(allow, list) and any("skill-distiller" in str(r) for r in allow):
-                has_rule = True
-        if default_mode == "auto" and not has_rule:
-            lines.append(
-                "[권한] 이 머신은 permissions.defaultMode=\"auto\" 인데 skill-distiller 를 "
-                "허용하는 allow 규칙이 없습니다. auto mode 에서는 백그라운드 도구 호출이 "
-                "프롬프트를 띄울 수 없어 자동 거부되므로, 증류 서브에이전트의 백그라운드 "
-                "호출이 차단됩니다. 증류가 막히면 사용자에게 ~/.claude/settings.json 의 "
-                "permissions.allow 에 다음 5줄 추가를 안내하세요(1회로 영구 해결): "
-                "Agent(self-improving-skills:skill-distiller), Read(~/.claude/skills/**), "
-                "Edit(~/.claude/skills/**), Write(~/.claude/skills/**), Read(~/.claude/projects/**)."
-            )
-    except Exception:
-        pass
+    그래서 settings 를 읽지 않는다. 백그라운드 호출이 실제로 막히는 것 — 그것이
+    auto 모드라는 유일하게 믿을 수 있는 신호다. 미리 예측하는 대신, 막혔을 때
+    무엇을 하면 되는지 복구 절차만 알려 둔다(상태 비의존, 항상 동일 출력).
+    플러그인은 설치만으로 사용자 권한을 열 수 없으므로(보안 경계), 실제 차단을
+    만났을 때 사람에게 1회 규칙 추가를 안내한다."""
+    lines.append(
+        "[권한] 증류 서브에이전트를 백그라운드(run_in_background=true)로 호출했을 때 "
+        "\"권한 분류기에 의해 차단됨\" 류 오류가 나면 — 그게 auto mode 신호입니다. "
+        "settings 를 미리 읽어 차단을 예측하지 말고 일단 호출하세요(skip 플래그·런타임 "
+        "모드 등 변수가 많아 settings 만으로는 판단 불가). 실제로 막혔을 때만 사용자에게 "
+        "~/.claude/settings.json 의 permissions.allow 에 다음 5줄 추가를 안내하세요"
+        "(1회로 영구 해결): Agent(self-improving-skills:skill-distiller), "
+        "Read(~/.claude/skills/**), Edit(~/.claude/skills/**), "
+        "Write(~/.claude/skills/**), Read(~/.claude/projects/**)."
+    )
 
 
 if __name__ == "__main__":
