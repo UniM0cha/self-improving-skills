@@ -36,7 +36,7 @@ from typing import NoReturn
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import team_config  # noqa: E402
 import team_manifest  # noqa: E402
-from scan_skill import NAME_RE, scan_dir  # noqa: E402
+from scan_skill import NAME_RE, SCANNER_VERSION, scan_dir  # noqa: E402
 
 try:
     import usage_store
@@ -188,7 +188,14 @@ def compute_plan(team_skills, manifest, reinstall=()):
                     if t_hash is None:
                         act("team_deleted_archive")
                     elif t_hash == o_hash:
-                        act("noop")
+                        # up to date & undiverged — but if the install-time
+                        # scan attestation is missing, from an older scanner,
+                        # or doesn't cover this content, rescan the local copy
+                        # (== origin content, since l_hash == o_hash).
+                        if _scan_stale(entry):
+                            act("rescan")
+                        else:
+                            act("noop")
                     else:
                         act("update")
                 else:
@@ -296,14 +303,37 @@ def _install_content(name, team_dir):
     return team_manifest.dir_hash(live)
 
 
-def _blocking_findings(team_dir):
-    """Blocking scan findings for incoming team content (empty list = clean)."""
+def _scan_findings(skill_dir):
+    """ALL scan findings for team-boundary content; scanner failure fails
+    CLOSED (a synthetic blocking finding)."""
     try:
-        return [f for f in scan_dir(team_dir) if f["severity"] == "block"]
+        return scan_dir(skill_dir)
     except Exception:
-        # scanner failure must fail CLOSED for incoming content
         return [{"file": ".", "id": "scan-error", "severity": "block",
                  "detail": "scanner failed"}]
+
+
+def _scan_stale(entry):
+    """True when a manifest entry's scan attestation is missing, produced by
+    an older scanner, or doesn't cover the current origin content — the sync
+    plan then emits a `rescan` for it (Hermes c36f6b72/51382ac2: bind scan
+    provenance to the exact installed content)."""
+    sp = entry.get("scan_provenance")
+    if not isinstance(sp, dict):
+        return True
+    return (sp.get("scanner_version") != SCANNER_VERSION
+            or sp.get("scanned_hash") != entry.get("origin_hash"))
+
+
+def _scan_provenance(scanned_hash, findings):
+    """The attestation persisted next to origin_hash at install/update time."""
+    return {
+        "scanner_version": SCANNER_VERSION,
+        "scanned_at": team_manifest.now_iso(),
+        "scanned_hash": scanned_hash,
+        "warn_findings": sorted({f["id"] for f in findings
+                                 if f.get("severity") != "block"}),
+    }
 
 
 def _quarantine(name, team_dir, blocking):
@@ -376,14 +406,22 @@ def apply_plan(actions, team_skills, commit, repo):
             # EVERY action that writes team content to disk passes the scan
             # gate — not just first install. A skill that was clean at install
             # time can turn malicious in a later team update.
+            scan = None
             if action in ("install", "update", "unsuppress_update", "adopt"):
-                blocking = _blocking_findings(team_dir)
+                scan = _scan_findings(team_dir)
+                blocking = [f for f in scan if f.get("severity") == "block"]
                 if blocking:
                     _quarantine(name, team_dir, blocking)
                     out["action"] = "quarantined"
                     out["findings"] = blocking
                     results.append(out)
                     continue
+                warns = [f for f in scan if f.get("severity") != "block"]
+                if warns:
+                    # warn-level findings don't block the install, but the
+                    # human must SEE them in the apply result — not only
+                    # buried inside the manifest's scan_provenance
+                    out["warnings"] = warns
 
             if action in ("install",):
                 new_hash = _install_content(name, team_dir)
@@ -394,6 +432,7 @@ def apply_plan(actions, team_skills, commit, repo):
                         "team_commit": commit,
                         "installed_at": team_manifest.now_iso(),
                         "updated_at": team_manifest.now_iso(),
+                        "scan_provenance": _scan_provenance(new_hash, scan),
                     }
                     m["suppressed"].pop(name, None)
                     m["quarantined"].pop(name, None)
@@ -409,10 +448,36 @@ def apply_plan(actions, team_skills, commit, repo):
                     e["team_commit"] = commit
                     e.setdefault("installed_at", team_manifest.now_iso())
                     e["updated_at"] = team_manifest.now_iso()
+                    e["scan_provenance"] = _scan_provenance(new_hash, scan)
                     e.pop("diverged_notified", None)
                     m["suppressed"].pop(name, None)
                 team_manifest.mutate(_u)
                 _seed_usage(name)
+
+            elif action == "rescan":
+                # attestation refresh for an installed, undiverged skill: the
+                # local copy IS the origin content here (compute_plan only
+                # emits rescan when l==o==t). Blocking findings under a NEWER
+                # scanner do not auto-remove installed content — surface them
+                # for the human instead (personalization/ownership rules).
+                findings = _scan_findings(_local_dir(name))
+                blocking = [f for f in findings if f.get("severity") == "block"]
+                warns = [f for f in findings if f.get("severity") != "block"]
+                if warns:
+                    # a NEWER scanner's warn-level catch on already-installed
+                    # content must reach the human — the attestation refresh
+                    # below would otherwise make the next sync a silent noop
+                    out["warnings"] = warns
+                if blocking:
+                    out["action"] = "rescan_flagged"
+                    out["findings"] = blocking
+                else:
+                    def _r(m):
+                        e = m["skills"].get(name)
+                        if isinstance(e, dict):
+                            e["scan_provenance"] = _scan_provenance(
+                                e.get("origin_hash"), findings)
+                    team_manifest.mutate(_r)
 
             elif action in ("self_heal", "unsuppress_heal"):
                 o = a.get("origin_hash")
@@ -428,6 +493,24 @@ def apply_plan(actions, team_skills, commit, repo):
                     m["pending_share"].pop(name, None)
                 team_manifest.mutate(_h)
                 _seed_usage(name)
+                # A healed entry has no scan attestation (the manifest was
+                # lost/corrupt), and the install-time scan may never have run
+                # on this machine — scan the local copy NOW instead of
+                # leaving a window until the next sync's rescan.
+                findings = _scan_findings(_local_dir(name))
+                blocking = [f for f in findings if f.get("severity") == "block"]
+                warns = [f for f in findings if f.get("severity") != "block"]
+                if warns:
+                    out["warnings"] = warns
+                if blocking:
+                    out["findings"] = blocking
+                    out["scan_flagged"] = True  # human decides; content stays
+                else:
+                    def _hsp(m):
+                        e = m["skills"].get(name)
+                        if isinstance(e, dict):
+                            e["scan_provenance"] = _scan_provenance(o, findings)
+                    team_manifest.mutate(_hsp)
 
             elif action == "adopt":
                 backup = _backup_before_adopt(name)
@@ -439,6 +522,7 @@ def apply_plan(actions, team_skills, commit, repo):
                         "team_commit": commit,
                         "installed_at": team_manifest.now_iso(),
                         "updated_at": team_manifest.now_iso(),
+                        "scan_provenance": _scan_provenance(new_hash, scan),
                     }
                     m["pending_share"].pop(name, None)
                 team_manifest.mutate(_a)

@@ -49,21 +49,32 @@ def _int_env(name, default):
 
 
 def _count_learned_skills():
-    """Count SKILL.md files under ~/.claude/skills that this plugin distilled."""
+    """Count learned skills this plugin distilled: DIRECT children of
+    ~/.claude/skills with a SKILL.md carrying our provenance marker — the same
+    counting rule as curator_transitions._learned_names. (A recursive walk
+    would also count SKILL.md copies under support dirs like references/ or
+    templates/, inflating the curation trigger — Hermes 9137b86a excludes
+    support-dir SKILL.md from discovery for the same reason.)"""
     learned = 0
     if not os.path.isdir(SKILLS_DIR):
         return learned
-    for root, dirs, files in os.walk(SKILLS_DIR):
-        # don't descend into archives / vcs / caches
-        dirs[:] = [d for d in dirs if d not in (".archive", ".git", "__pycache__", "node_modules")]
-        if "SKILL.md" in files:
-            try:
-                with open(os.path.join(root, "SKILL.md"), encoding="utf-8", errors="ignore") as fh:
-                    head = fh.read(2048)
-                if PROVENANCE_KEY in head:
-                    learned += 1
-            except Exception:
-                pass
+    try:
+        entries = os.listdir(SKILLS_DIR)
+    except Exception:
+        return learned
+    for entry in entries:
+        if entry.startswith("."):
+            continue
+        path = os.path.join(SKILLS_DIR, entry, "SKILL.md")
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                head = fh.read(2048)
+            if PROVENANCE_KEY in head:
+                learned += 1
+        except Exception:
+            pass
     return learned
 
 
@@ -140,14 +151,14 @@ def main():
         emit_context(None)
 
     lines = [
-        "[self-improving-skills] 자기개선 루프 활성.",
-        "복잡한 작업·까다로운 디버깅·새 기법 발견을 끝냈고 그것이 재사용 가능하다면, "
-        "Task(또는 Agent) 도구로 subagent_type=\"self-improving-skills:skill-distiller\" "
-        "서브에이전트를 run_in_background=true 로 호출하거나(네임스페이스 접두사 생략 시 "
-        "호출 실패; 백그라운드 필수 — 증류 중 사용자 입력이 막히지 않게) /distill-skill 로 "
-        "~/.claude/skills 에 남기세요. 그냥 종료하면 Stop 훅이 한 번 상기시킵니다.",
-        "학습 스킬을 사용하다가 낡았거나 틀린 내용을 발견하면, 시키기를 기다리지 말고 "
-        "그 자리에서 해당 SKILL.md 를 patch 하세요 — 유지보수되지 않는 스킬은 부채가 됩니다.",
+        "[self-improving-skills] 자기개선 루프 활성. 복잡한 작업·까다로운 디버깅·새 기법 발견을 "
+        "끝냈고 재사용 가능하다면, /distill-skill 또는 Task(또는 Agent) 도구로 "
+        "subagent_type=\"self-improving-skills:skill-distiller\"(네임스페이스 접두사 생략 시 "
+        "호출 실패)를 run_in_background=true 로 호출해 ~/.claude/skills 에 남기세요 — "
+        "그냥 종료하면 Stop 훅이 한 번 상기시킵니다.",
+        "학습 스킬에서 낡거나 틀린 내용을 발견하면 그 자리에서 해당 SKILL.md 를 patch 하세요. "
+        "백그라운드 증류 호출이 \"권한 분류기에 의해 차단됨\"으로 막히면 플러그인 README 의 "
+        "'auto mode' 섹션(permissions.allow 5줄)을 참조해 사용자에게 1회 추가를 안내하세요.",
     ]
     if learned:
         lines.append("현재 학습된 스킬 {0}개가 ~/.claude/skills 에 누적되어 있습니다.".format(learned))
@@ -163,7 +174,6 @@ def main():
         pass
 
     _team_sync_reminder(lines)
-    _perm_block_recovery_hint(lines)
 
     emit_context("\n".join(lines))
 
@@ -207,31 +217,12 @@ def _team_sync_reminder(lines):
         pass
 
 
-def _perm_block_recovery_hint(lines):
-    """증류 백그라운드 호출이 권한 분류기에 막혔을 때의 복구 절차를 1회 주입한다.
-
-    Why: 과거엔 settings.json 의 permissions.defaultMode 를 읽어 "auto 모드라서
-    차단된다"고 미리 경고했으나 — 차단 여부는 settings 하나로 판단할 수 없다.
-    top-level skipAutoPermissionPrompt/skipDangerousModePermissionPrompt 플래그,
-    bypassPermissions/acceptEdits 모드, 프로젝트·엔터프라이즈 settings, CLI 플래그,
-    런타임 모드 변경 등 변수가 많아, defaultMode=="auto" 만 보고 "차단됩니다"라고
-    단정하면 false negative 가 난다(실제로 에이전트가 시도조차 없이 증류를 보류함).
-
-    그래서 settings 를 읽지 않는다. 백그라운드 호출이 실제로 막히는 것 — 그것이
-    auto 모드라는 유일하게 믿을 수 있는 신호다. 미리 예측하는 대신, 막혔을 때
-    무엇을 하면 되는지 복구 절차만 알려 둔다(상태 비의존, 항상 동일 출력).
-    플러그인은 설치만으로 사용자 권한을 열 수 없으므로(보안 경계), 실제 차단을
-    만났을 때 사람에게 1회 규칙 추가를 안내한다."""
-    lines.append(
-        "[권한] 증류 서브에이전트를 백그라운드(run_in_background=true)로 호출했을 때 "
-        "\"권한 분류기에 의해 차단됨\" 류 오류가 나면 — 그게 auto mode 신호입니다. "
-        "settings 를 미리 읽어 차단을 예측하지 말고 일단 호출하세요(skip 플래그·런타임 "
-        "모드 등 변수가 많아 settings 만으로는 판단 불가). 실제로 막혔을 때만 사용자에게 "
-        "~/.claude/settings.json 의 permissions.allow 에 다음 5줄 추가를 안내하세요"
-        "(1회로 영구 해결): Agent(self-improving-skills:skill-distiller), "
-        "Read(~/.claude/skills/**), Edit(~/.claude/skills/**), "
-        "Write(~/.claude/skills/**), Read(~/.claude/projects/**)."
-    )
+# NOTE(v0.10.0): the always-on ~470-char permission-recovery hint that used to
+# be injected here every session was replaced by one-clause pointers — in the
+# intro lines above and in the Stop-hook nudge (where blocks actually happen).
+# The full 5-rule recovery recipe lives in README "auto mode" 섹션. The design
+# rationale stands: never predict a block from settings (skip flags, runtime
+# modes, enterprise settings make that unreliable) — react to a REAL block.
 
 
 if __name__ == "__main__":

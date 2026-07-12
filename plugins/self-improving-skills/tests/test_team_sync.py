@@ -330,3 +330,61 @@ def test_staging_crash_recovery_restores_old(sandbox, tmp_path):
     assert (sandbox.skills / "team-skill" / "SKILL.md").exists()
     assert not (staging / "team-skill.old").exists()
     assert not (staging / "leftover-junk").exists()
+
+
+def test_install_records_scan_provenance(sandbox, tmp_path):
+    _install_one(sandbox, tmp_path)
+    entry = sandbox.team_manifest.load()["skills"]["team-skill"]
+    sp = entry["scan_provenance"]
+    assert sp["scanner_version"] == sandbox.team_sync.SCANNER_VERSION
+    assert sp["scanned_hash"] == entry["origin_hash"]
+    assert sp["warn_findings"] == []
+
+
+def test_stale_attestation_triggers_rescan(sandbox, tmp_path):
+    team = _install_one(sandbox, tmp_path)
+
+    def _age(m):  # simulate an entry installed under an older scanner
+        m["skills"]["team-skill"]["scan_provenance"]["scanner_version"] = "sis-scan-v1"
+    sandbox.team_manifest.mutate(_age)
+    assert _plan(sandbox, team)["team-skill"]["action"] == "rescan"
+    res = _apply(sandbox, team)
+    assert res["team-skill"]["action"] == "rescan"
+    sp = sandbox.team_manifest.load()["skills"]["team-skill"]["scan_provenance"]
+    assert sp["scanner_version"] == sandbox.team_sync.SCANNER_VERSION
+    # attestation refreshed → back to noop
+    assert _plan(sandbox, team)["team-skill"]["action"] == "noop"
+
+
+def test_legacy_entry_without_attestation_rescans(sandbox, tmp_path):
+    team = _install_one(sandbox, tmp_path)
+
+    def _strip(m):  # pre-v0.10.0 manifests have no scan_provenance at all
+        m["skills"]["team-skill"].pop("scan_provenance", None)
+    sandbox.team_manifest.mutate(_strip)
+    assert _plan(sandbox, team)["team-skill"]["action"] == "rescan"
+
+
+def test_rescan_flags_blocking_without_removal(sandbox, tmp_path):
+    """A stronger scanner catching something in already-installed content must
+    surface it — never silently delete the user's installed skill."""
+    team = _install_one(sandbox, tmp_path)
+    secret = ("---\nname: team-skill\ndescription: d\n---\n"
+              "token ghp_" + "a" * 36 + "\n")
+    (sandbox.skills / "team-skill" / "SKILL.md").write_text(secret, encoding="utf-8")
+    (tmp_path / "teamclone" / "team-skill" / "SKILL.md").write_text(secret, encoding="utf-8")
+    new_hash = sandbox.team_manifest.dir_hash(str(sandbox.skills / "team-skill"))
+
+    def _fix(m):  # l == o == t with a stale attestation → rescan path
+        e = m["skills"]["team-skill"]
+        e["origin_hash"] = new_hash
+        e["scan_provenance"]["scanned_hash"] = "stale"
+    sandbox.team_manifest.mutate(_fix)
+    assert _plan(sandbox, team)["team-skill"]["action"] == "rescan"
+    res = _apply(sandbox, team)
+    assert res["team-skill"]["action"] == "rescan_flagged"
+    assert any(f["id"] == "github-pat" for f in res["team-skill"]["findings"])
+    # installed content untouched; attestation NOT refreshed (stays flagged)
+    assert "ghp_" in (sandbox.skills / "team-skill" / "SKILL.md").read_text(encoding="utf-8")
+    sp = sandbox.team_manifest.load()["skills"]["team-skill"]["scan_provenance"]
+    assert sp["scanned_hash"] == "stale"

@@ -28,7 +28,29 @@ happened instead of relying on the summary alone. Also read the files that were
 changed. Start by understanding: **what did this session figure out that was
 non-obvious and would save time if it recurred?**
 
+## Signals worth capturing (what counts as skill-worthy)
+
+- **User corrections and frustration are first-class signals** — not just
+  discovered techniques. If the user corrected style, tone, format, or workflow
+  ("stop doing X", "너무 장황해", "다음부턴 Y로 해"), that correction belongs in
+  the body of the learned skill that GOVERNS that class of task, so the next
+  session doing that task already behaves corrected. Boundary: only embed
+  corrections tied to a task class. General persona/tone preferences unrelated
+  to any task class are the native auto-memory's job (memory = who the user is;
+  skills = how to do this class of task) — do not duplicate them here.
+- **Non-obvious techniques** the session figured out (the classic case).
+- **A loaded skill that turned out wrong or stale** — see step 0 below.
+
 ## Decision procedure (follow in order — prefer the earliest that applies)
+
+0. **Patch the skill that was in play.** Check the transcript for skills that
+   were actually loaded this session — a `Skill` tool call, or a `Read` of a
+   `SKILL.md`. If one of those is a learned skill under `~/.claude/skills` and
+   it covers this session's domain, it is the skill to patch first: it routed
+   the work, so its gaps/errors are exactly what future sessions will hit.
+   If the in-play skill is an installed PLUGIN skill (not under
+   `~/.claude/skills`), do NOT edit that file — apply step 4's delta rule
+   instead (capture only the delta beyond what the plugin teaches, or nothing).
 
 1. **Patch a directly-relevant existing skill.** Glob `~/.claude/skills/**/SKILL.md`
    and read any whose name/description matches the technique's domain. If one
@@ -66,7 +88,11 @@ non-obvious and would save time if it recurred?**
 - Environment-dependent failures or machine-specific workarounds ("works only
   because my PATH has X"). These mislead future sessions on other machines.
 - Negative tool claims ("tool Z doesn't work") — they age badly and are often
-  wrong outside the moment.
+  wrong outside the moment. Setup/tooling failures are capturable ONLY as the
+  FIX (the install command, config, env var that made it work), filed under an
+  existing setup/troubleshooting skill — never as "X is broken".
+- Transient errors that resolved within the session — if a retry worked, the
+  lesson (if any) is the retry pattern, not the original failure.
 - Things already obvious from docs or already covered by an existing skill.
 - Pure user-directed feature work with no discovered technique.
 
@@ -110,11 +136,18 @@ ported from Anthropic's skill-creator guidance):
 - Aim for **<=500 chars**: every learned skill's description is injected into
   every future session's system prompt, so length is a permanent context cost
   (the validator warns above 500).
+- After writing the description, **COUNT the characters yourself**; if it is
+  over 500, cut it down BEFORE saving — do not save long and wait for the
+  validator warning to fix it.
 
 **Body rules**: imperative/infinitive mood ("To fix X, do Y" — not "You should
 do Y"). Keep the body focused (roughly 1,500–2,000 words max); move long
 references, API dumps, and reproduction recipes into the skill's `references/`
 subdir and point to them with one line.
+Record only commands, flags, paths, and API signatures you actually ran or
+observed in output THIS session — never invent plausible-looking ones you
+didn't see. If a detail is uncertain, mark it as a verification step
+("verify with `--help`") instead of stating it as fact.
 
 Keep the `metadata.provenance: self-improving-skills` line — it marks the skill
 as agent-distilled so `/curate-skills` and the session counter can find it.

@@ -22,4 +22,6 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/curator_transitions.py archive "<name>"
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/curator_transitions.py archive "<name>" "<umbrella-skill-name>"
 ```
 
+명령이 `ok: false`를 반환하면 그대로 따르세요: `umbrella not found`면 umbrella 스킬을 먼저 만들거나 patch한 뒤 재시도하고, pinned·user·team 스킬 거부는 정상 보호 동작입니다 (`--force`는 사용자가 명시적으로 원할 때만).
+
 변경 전 tar.gz 스냅샷이 자동으로 생성되며, `/restore-skill "<name>"` 로 복구할 수 있습니다.

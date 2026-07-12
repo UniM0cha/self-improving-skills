@@ -18,4 +18,6 @@ Task(또는 Agent) 도구로 `subagent_type="self-improving-skills:skill-distill
 
 $ARGUMENTS 가 주어지면, 그 안내(예: 특정 기법에 집중, 또는 특정 기존 스킬을 갱신)를 서브에이전트에 함께 전달하세요.
 
+환경변수 `SIS_DISTILLER_MODEL` 이 설정되어 있으면(예: `sonnet`) 호출에 `model="<값>"` 파라미터를 포함하세요 — 호출 시 지정한 model 이 에이전트 frontmatter 의 `model: inherit` 보다 우선하므로, 증류만 저가 모델로 라우팅하는 opt-in 입니다. 값이 `haiku` 면 무시하세요(서브에이전트 Haiku 금지 정책).
+
 > 참고: 증류는 "재사용 가능한 기법"이 있을 때만 의미가 있습니다. 단순 기능 구현·리팩토링·일회성 수정만 했다면 서브에이전트가 스스로 "만들 것 없음"으로 판단하고 종료하는 것이 정상입니다.

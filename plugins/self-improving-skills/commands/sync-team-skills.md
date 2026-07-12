@@ -30,6 +30,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/team_sync.py plan
 | `team_deleted_keep` | 팀에서 삭제됐지만 내가 수정함 — 내 것으로 유지(소유 이관) |
 | `suppressed_team_updated` | 꺼둔 스킬이 팀에서 갱신됨 — 복귀하려면 `--reinstall <name>` |
 | `quarantined` | 보안 스캔 실패 — 설치 보류, findings 확인 필요 |
+| `rescan` | 설치본의 스캔 attestation이 낡음(스캐너 구버전/해시 불일치/기록 없음) — apply 시 로컬 사본 재스캔 후 attestation 갱신 |
+| `rescan_flagged` | **재스캔에서 blocking finding 발견** — 설치본은 자동 제거하지 않음, findings를 사용자에게 보여주고 판단 받기 |
 
 ### 2. 적용 (사용자 확인 후에만)
 
@@ -47,6 +49,6 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/team_sync.py apply --reinstall <name>
 
 ### 3. 보고
 
-적용 결과 summary를 전하세요. `skip_diverged`가 있으면 해당 스킬은 팀 업데이트를 받지 못하고 있음을 알리고, diff 확인 방법을 안내하세요 (팀 최신과 비교하려면 plan을 다시 실행해 상태를 보거나, 팀 repo를 직접 열람). `quarantined`가 있으면 `~/.claude/self-improve/team_quarantine/<name>`의 내용과 findings를 사용자에게 보여주고 판단을 받으세요.
+적용 결과 summary를 전하세요. **action 종류와 무관하게** 결과에 `warnings` 필드가 있으면(install/update/adopt/rescan/self_heal 모두 해당) — 설치·유지는 됐지만 스캐너가 경고(로컬 경로 등)를 냈다는 뜻이고, attestation 갱신 후 다음 sync부터는 noop이 되어 다시는 표시되지 않으니 — 지금 이 자리에서 해당 finding들을 반드시 사용자에게 보여주세요. `skip_diverged`가 있으면 해당 스킬은 팀 업데이트를 받지 못하고 있음을 알리고, diff 확인 방법을 안내하세요 (팀 최신과 비교하려면 plan을 다시 실행해 상태를 보거나, 팀 repo를 직접 열람). `quarantined`가 있으면 `~/.claude/self-improve/team_quarantine/<name>`의 내용과 findings를 사용자에게 보여주고 판단을 받으세요. `rescan_flagged`가 있으면 새 스캐너가 기설치 스킬에서 잡아낸 findings이니 — 파일은 그대로 있고 아무것도 제거되지 않았음을 함께 알리고 — 사용자가 내용을 확인해 유지/아카이브를 결정하게 하세요.
 
 > 팀 스킬은 `created_by: team`으로 기록되어 개인 큐레이터의 자동 stale/archive 대상에서 제외됩니다 (소유자는 팀 repo). 텔레메트리(use/view)는 정상 집계됩니다.

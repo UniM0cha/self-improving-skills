@@ -188,7 +188,7 @@ def _diverged_notice(name, file_path, entry):
         return None
 
 
-def _advisory(text):
+def _advisory(text, file_path=None):
     """Non-blocking quality advisories for a VALID skill (never trips rollback)."""
     fm, _body = _split_frontmatter(text)
     if fm is None:
@@ -205,9 +205,71 @@ def _advisory(text):
         notes.append("`name`에 선행·후행·연속 하이픈이 있습니다({0}). 공식 스킬 규약 위반이니 "
                      "디렉토리명과 함께 단어-사이-하이픈 형태로 바꾸는 것을 권장합니다."
                      .format(name))
+    # name ≠ dir mismatch: usage telemetry keys on the DIR name while the
+    # team-share gate (scan_skill) requires frontmatter name == dir name —
+    # a mismatch silently splits those. Advisory only (never blocking, so a
+    # pre-existing mismatched skill can't fall into an edit→rollback loop).
+    dirname = os.path.basename(os.path.dirname(str(file_path or "").replace("\\", "/")))
+    if name and dirname and name != dirname:
+        notes.append("frontmatter name('{0}')과 디렉토리명('{1}')이 다릅니다. usage 텔레메트리는 "
+                     "디렉토리명으로 집계되고 팀 공유 게이트(scan_skill)는 일치를 요구하므로 "
+                     "어긋납니다 — 디렉토리명 또는 name 을 일치시키는 것을 권장합니다."
+                     .format(name, dirname))
     if notes:
         return "[self-improving-skills] 참고:\n- " + "\n- ".join(notes)
     return None
+
+
+def _frontmatter_has_pin(text):
+    """`pinned: true` inside the CLOSED frontmatter block only — a
+    `pinned: true` example in a skill's body must not count. Trailing
+    inline comments (`pinned: true # keep`) are valid YAML and count."""
+    fm, _ = _split_frontmatter(text or "")
+    if fm is None:
+        return False
+    return bool(re.search(r"^\s*pinned\s*:\s*true\b", fm, re.I | re.M))
+
+
+def _pinned_guard(file_path, payload, current_text):
+    """C5 (Hermes 525e1e77): an AUTONOMOUS distiller edit to a pinned skill is
+    rolled back — unattended maintenance has no user present to consent.
+    Foreground (human-driven) edits stay allowed: same asymmetry as Hermes.
+
+    Pinned is decided from the usage record, the PRE-edit backup's frontmatter
+    (the edit itself could have stripped the marker), or — for a brand-new
+    file with no backup/record — the written frontmatter itself (a distiller
+    must not CREATE a curator-protected pinned skill unnoticed)."""
+    agent_type = str(payload.get("agent_type") or "")
+    if "skill-distiller" not in agent_type:
+        return None
+    norm = str(file_path).replace("\\", "/")
+    name = os.path.basename(os.path.dirname(norm))
+    pinned = False
+    if usage_store is not None:
+        try:
+            pinned = bool(usage_store.all_records().get(name, {}).get("pinned"))
+        except Exception:
+            pinned = False
+    if not pinned:
+        bp = _backup_path(file_path)
+        try:
+            if os.path.isfile(bp):
+                with open(bp, encoding="utf-8", errors="ignore") as fh:
+                    pinned = _frontmatter_has_pin(fh.read())
+            else:
+                pinned = _frontmatter_has_pin(current_text)  # new file
+        except Exception:
+            pass
+    if not pinned:
+        return None
+    if _rollback_if_possible(file_path):
+        return ("[self-improving-skills] '{0}' 은 pinned 스킬입니다 — 자율 증류(skill-distiller)는 "
+                "pinned 스킬을 수정할 수 없어 편집 직전 버전으로 롤백했습니다. 이 변경이 정말 "
+                "필요하면 내용을 사용자에게 보고하고 unpin 여부를 물어보세요.".format(name))
+    # Nothing to roll back to (the distiller CREATED a new pinned skill) —
+    # deleting a brand-new file is riskier than leaving it; warn only.
+    return ("[self-improving-skills] '{0}' 은 pinned 스킬입니다 — 자율 증류가 수정할 대상이 "
+            "아닙니다. 변경 내용을 사용자에게 보고하고 승인/unpin 을 요청하세요.".format(name))
 
 
 def _stamp_provenance(path, text):
@@ -282,6 +344,15 @@ def main():
     except Exception:
         silent()
 
+    # Autonomous-distiller writes to a pinned skill roll back before anything
+    # else — the guard supersedes validation (the edit is not allowed at all).
+    try:
+        guard_msg = _pinned_guard(file_path, payload, text)
+    except Exception:
+        guard_msg = None
+    if guard_msg:
+        feedback(guard_msg)
+
     problems = _validate(text)
     if not problems:
         norm = str(file_path).replace("\\", "/")
@@ -294,7 +365,7 @@ def main():
             _stamp_provenance(file_path, text)
         _record_patch(file_path, text, payload, team_entry=entry)
         msgs = [m for m in (_diverged_notice(name, file_path, entry),
-                            _advisory(text)) if m]
+                            _advisory(text, file_path)) if m]
         if msgs:
             feedback("\n\n".join(msgs))
         silent()

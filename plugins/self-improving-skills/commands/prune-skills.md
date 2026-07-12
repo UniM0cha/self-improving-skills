@@ -22,6 +22,6 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/curator_transitions.py prune <days>
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/curator_transitions.py prune <days> --apply
 ```
 
-`--apply` 는 변경 전 tar.gz 스냅샷을 뜨고, 후보들을 `~/.claude/skills/.archive/` 로 이동(삭제 아님)합니다. `/restore-skill` 로 언제든 되돌릴 수 있습니다.
+`--apply` 는 변경 전 tar.gz 스냅샷을 뜨고, 후보들을 `~/.claude/skills/.archive/` 로 이동(삭제 아님)합니다. 개별 복구는 `/restore-skill`, 이번 정리 전체를 되돌리려면 `/curator-rollback` (스냅샷 + usage 메타 복원) 을 쓰세요.
 
 > 단일 스킬만 정리하려면 `/archive-skill <name>` 을, 특정 스킬을 보호하려면 `/pin-skill <name>` 을 쓰세요.

@@ -17,9 +17,10 @@
 
 - **TELEMETRY** (v0.2.0) — `Stop` 훅이 transcript에서 학습 스킬의 **사용 빈도를 추적**: `Skill` 호출→use, SKILL.md `Read`→view, `Write/Edit`→patch. `~/.claude/self-improve/skill_usage.json`에 use/view/patch 카운트 + 마지막 사용 시각 + `created_at` + `created_by`(agent/user)를 기록(atomic+flock, 세션별 offset으로 중복 방지). 이게 큐레이터가 "실제 안 쓰는 스킬"을 식별하는 데이터 기반입니다.
 - **VALIDATE + 트랜잭션 편집** (v0.5.0) — `PreToolUse` 훅이 학습 SKILL.md를 편집 **직전에 백업**하고, `PostToolUse` 훅이 편집 후 frontmatter·크기를 검증. 편집이 구조를 깨뜨리면 **백업에서 자동 롤백**(Hermes `_patch_skill`의 backup→re-validate→rollback 이식)하고 모델에 다시 시도하도록 알림. 정상 편집은 무간섭. 처음 만들어진 학습 스킬엔 `metadata.provenance` 자동 부착 + usage 레코드 시딩(티어링: distiller=agent, 사용자 직접=user).
-- **CURATE** (v0.3.0) — **시간기반 미사용 스킬 자동 정리**. `SessionStart` 훅이 큐레이션 주기(기본 7일)가 됐는지 확인하고, 됐으면 `curator_transitions.py`를 **인라인 자동 실행**: 마지막 활동(use/view/patch) 기준 **30일 미사용→stale, 90일→archive**(`.archive/` 로 이동, 삭제 아님). 변경 전 tar.gz 스냅샷을 뜨고, 다시 쓰이면 stale→active로 재활성화. **pin된 스킬과 사용자 작성(`created_by:user`) 스킬은 절대 건드리지 않음.** 의미 기반 중복 통합은 `/curate-skills`(LLM, 병합 시 `absorbed_into` 기록)가 담당. 수동 제어 커맨드: `/curator-status`(상태·통계), `/prune-skills`(N일 미사용 일괄, dry-run), `/archive-skill`(단일), `/pin-skill`(보호), `/restore-skill`(복구).
+- **CURATE** (v0.3.0) — **시간기반 미사용 스킬 자동 정리**. `SessionStart` 훅이 큐레이션 주기(기본 7일)가 됐는지 확인하고, 됐으면 `curator_transitions.py`를 **인라인 자동 실행**: 마지막 활동(use/view/patch) 기준 **30일 미사용→stale, 90일→archive**(`.archive/` 로 이동, 삭제 아님). 변경 전 tar.gz 스냅샷을 뜨고, 다시 쓰이면 stale→active로 재활성화. **pin된 스킬과 사용자 작성(`created_by:user`) 스킬은 절대 건드리지 않음.** 의미 기반 중복 통합은 `/curate-skills`(LLM, 병합 시 `absorbed_into` 기록)가 담당. 수동 제어 커맨드: `/curator-status`(상태·통계), `/prune-skills`(N일 미사용 일괄, dry-run), `/archive-skill`(단일), `/pin-skill`(보호), `/restore-skill`(복구), `/curator-rollback`(스냅샷 전체 롤백 — usage 메타 포함, 롤백도 언두 가능).
 - **수동 트리거** — `/distill-skill` 로 언제든 증류를 직접 실행.
 - **TEAM SHARE** (v0.9.0) — **팀 스킬 공유(origin-hash 동기화)**. 팀 repo는 하드코딩되지 않으며 각 사용자가 `~/.claude/self-improve/team_config.json` 에 지정합니다(대부분 private repo, gh 인증 경유). **보내기** `/share-skill <name>`: 정적 스캔(시크릿·로컬경로·인젝션) → LLM 일반화(취향 제거, 기법만) → diff 확인 → 격리 clone 에서 팀 repo `skills/<name>/` 로 PR(머지는 사람). **받기** `/sync-team-skills`: 매 실행 fresh shallow clone → plan(read-only) 표 확인 → apply. **origin-hash 규칙이 개인화를 구조적으로 보호합니다**: 설치 시점의 디렉토리 내용 해시를 매니페스트(`team_sync.json`)에 기록하고, ▸ 내 사본이 그대로면 자동 업데이트 ▸ 내가 수정했으면 절대 덮지 않음(diverged 안내 1회) ▸ 내가 삭제/아카이브하면 재설치 안 함(suppression, `--reinstall` 로 복귀) ▸ 동명 개인 스킬은 충돌 스킵. 설치 전 정적 스캔 실패 시 격리(`team_quarantine/`). 내가 공유한 PR이 머지되면 다음 sync 가 개인 원본을 백업 후 팀 관리본으로 전환(adopt). 팀 스킬은 `created_by: team` 으로 기록되어 **개인 큐레이터가 절대 정리하지 않습니다**(소유자는 팀 repo — Hermes hub 원칙). per-skill 스테이징 트랜잭션 + 크래시 자가치유(local==team 이면 origin 재기록) 포함.
+- **HERMES SYNC** (v0.10.0) — Hermes 최신(v2026.7.1, 2026-07) 대조 재이식 14건. **distiller 프롬프트**: 이번 세션에 로드된(in-play) 스킬 최우선 패치 + 사용자 교정·좌절 표현을 1급 시그널로(태스크 결부 교정만 스킬에, 일반 선호는 네이티브 메모리 몫) + 세션 내 해소된 일시 오류 캡처 금지 + description 저장 전 자기검증 + "실행/관찰한 것만 기록" 환각 방지. **트리거**: 파일 편집 0회 조사·디버깅 구간도 증류 대상(`SIS_DISTILL_READONLY_THRESHOLD`). **큐레이터 안전장치**: `archive_one` fail-closed 가드(absorbed_into 실존·자기참조 검증, pinned/team/user 거부 — Hermes #29912 이식), pinned 스킬 자율 편집 자동 롤백, 타임스탬프 접미 아카이브 정확 복구(prefix 삼킴 금지 — Hermes 992b9223), 스냅샷에 usage 메타 수록 + `/curator-rollback`(롤백 자체도 언두 가능 — fc1119ca), `/curate-skills` 시각 기록을 검토 시작 시점으로 이동(`mark-curated`, nag 루프 차단) + 구조화 결과 기록(consolidations.yaml). **팀 공유**: 스캐너에 invisible unicode 17종 검출·NFKC 동형문자 폴딩·정규식 ReDoS 바운딩 + 설치 스캔 attestation(`scan_provenance` — 스캐너 업그레이드 시 자동 rescan, 기설치본은 자동 제거 없이 사람 판단). **현대화**: SessionStart 상시 주입 축소(~10줄→~4줄, 권한 복구는 차단 발생 지점으로 이동), `SIS_DISTILLER_MODEL` 비용 라우팅 opt-in.
 - **UPSTREAM 기여** (v0.6.0) — 플러그인 *자기 자신*의 개선을 닫는 두 단계. **L1(감지·알림)**: `Stop` 훅이 이번 구간에서 self-improving-skills 코어 소스(`plugins/self-improving-skills/**`)를 편집했음을 감지하면, skills 증류와 별개로 "코어를 건드렸으니 upstream에 PR로 제안 가능"을 알립니다(정보 제공만, 자동 행동 없음). **L2(opt-in 자동 PR)**: `/propose-plugin-improvement` 가 격리된 fresh clone에서 변경을 재현해 upstream(`samton-inc/samton-claude`)에 PR을 엽니다. **설계 불변식**: 자동 push·머지 없음(PR까지만, 머지는 사람) / `SIS_PLUGIN_PR=1` opt-in 기본 OFF / fresh clone + commit 전 index 초기화 + 화이트리스트 서브트리만 스테이징(그 밖 경로가 staged되면 PR 중단)으로 transcript·로컬 비밀 유입 차단 / write 권한 없으면 fork 경유. distiller(skills 전담)와 책임이 분리되어 있습니다 — distiller는 PR을 만들지 않습니다.
 
 ## 흐름
@@ -45,6 +46,8 @@ skill-distiller 서브에이전트 (격리 컨텍스트)
 |---|---|---|
 | `SIS_DISTILL_THRESHOLD` | `12` | 증류 nudge를 띄울, 마지막 증류 이후 누적 도구 호출 수 |
 | `SIS_MIN_FILE_EDITS` | `2` | nudge 조건: 마지막 증류 이후 실제 파일 편집(Edit/Write/MultiEdit) 최소 횟수. 순수 탐색·질의 턴은 트리거하지 않게 함 |
+| `SIS_DISTILL_READONLY_THRESHOLD` | `24` | 파일 편집이 **0회**인 구간도 도구 호출이 이 수를 넘으면 nudge — 긴 조사·디버깅 세션의 진단 기법(커맨드 사다리·원인 규명 패턴)이 영원히 증류되지 않는 갭을 막음 (Hermes 는 툴 iteration 만으로 트리거) |
+| `SIS_DISTILLER_MODEL` | (없음) | 설정 시(예: `sonnet`) nudge·/distill-skill 이 distiller 호출에 `model="<값>"` 파라미터를 포함하라고 안내 — per-invocation model 이 frontmatter 를 이기므로 **증류만** 저가 모델로 라우팅하는 opt-in (기본은 메인 모델 상속, `haiku` 값은 무시 — 서브에이전트 Haiku 금지 정책) |
 | `SIS_CURATE_MIN_SKILLS` | `8` | 자동 큐레이션을 시작하는 학습 스킬 수 |
 | `SIS_CURATE_INTERVAL_DAYS` | `7` | 큐레이터 자동 실행 간격(일) |
 | `SIS_STALE_AFTER_DAYS` | `30` | 마지막 활동 후 이 일수 미사용 시 stale 마킹 |
@@ -75,7 +78,7 @@ skill-distiller 서브에이전트 (격리 컨텍스트)
 - distiller 가 보조 `Bash`(검증·grep)를 쓰다 막히면, 백그라운드 에이전트 로그의 deny 를 보고 좁은 `Bash(...)` 규칙을 점진 추가하세요.
 - `defaultMode` 가 `"default"`(대화형 승인) 면 포그라운드 호출은 프롬프트로 승인할 수 있으나, **백그라운드 호출은 mode 와 무관하게 사전 allow 가 필요**합니다.
 
-auto mode + 규칙 부재가 감지되면 SessionStart 안내가 이 사실을 한 번 일러줍니다.
+SessionStart 는 이 절차의 전문을 매 세션 주입하지 않습니다(상시 컨텍스트 비용) — 짧은 참조 포인터만 남기고, 실제 차단이 가장 자주 발생하는 지점인 Stop 훅 nudge 문구가 차단 시 이 섹션을 참조하라고 안내합니다. 원칙은 그대로입니다: settings 를 읽어 차단을 예측하지 말 것(skip 플래그·런타임 모드 등 변수가 많음), 실제로 막혔을 때만 위 5줄 추가를 안내할 것.
 
 ## 설계 원칙 — dev-log의 실패에서 배운 가드레일
 

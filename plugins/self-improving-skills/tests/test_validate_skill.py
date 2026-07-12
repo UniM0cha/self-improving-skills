@@ -87,6 +87,37 @@ def test_provenance_stamped_once(run_validator, sandbox):
     assert (d / "SKILL.md").read_text(encoding="utf-8").count("provenance") == 1
 
 
+def test_pinned_skill_distiller_edit_rolls_back(run_validator, sandbox):
+    d = sandbox.make_skill("pinned-skill")
+    good = (d / "SKILL.md").read_text(encoding="utf-8")
+    sandbox.usage_store.set_fields("pinned-skill", pinned=True)
+    _backup(sandbox, "pinned-skill")
+    (d / "SKILL.md").write_text(good + "\nDISTILLER EDIT\n", encoding="utf-8")
+    out = run_validator(_payload(d / "SKILL.md",
+                                 agent_type="self-improving-skills:skill-distiller"))
+    assert "pinned" in out
+    assert (d / "SKILL.md").read_text(encoding="utf-8") == good  # rolled back
+
+
+def test_pinned_skill_foreground_edit_allowed(run_validator, sandbox):
+    d = sandbox.make_skill("pinned-skill")
+    sandbox.usage_store.set_fields("pinned-skill", pinned=True)
+    _backup(sandbox, "pinned-skill")
+    new = "---\nname: pinned-skill\ndescription: d2\n---\nbody2\n"
+    (d / "SKILL.md").write_text(new, encoding="utf-8")
+    out = run_validator(_payload(d / "SKILL.md"))  # no agent_type → human-driven
+    assert "pinned" not in out
+    assert "body2" in (d / "SKILL.md").read_text(encoding="utf-8")  # kept
+
+
+def test_name_dir_mismatch_is_advisory_only(run_validator, sandbox):
+    body = "---\nname: other-name\ndescription: d\n---\nbody\n"
+    d = sandbox.make_skill("mismatch-skill", body)
+    out = run_validator(_payload(d / "SKILL.md"))
+    assert "디렉토리명" in out and "롤백" not in out
+    assert "body" in (d / "SKILL.md").read_text(encoding="utf-8")  # untouched
+
+
 def test_non_skill_paths_ignored(sandbox):
     env = dict(os.environ, HOME=str(sandbox.home))
     p = subprocess.run(

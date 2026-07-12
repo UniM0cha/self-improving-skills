@@ -343,20 +343,28 @@ def main():
                 # doesn't keep re-firing on the same old edit in later Stops
                 core_touched = False
 
-    # Two independent triggers, merged into one block message:
+    # Three independent triggers, merged into one block message:
     #   (1) nudge_fires — the undistilled segment is BOTH substantial (enough
     #       tool calls) AND has real artifacts (enough file edits). Keeps pure
     #       exploration/Q&A turns from triggering while staying broad across all
     #       kinds of work (unlike dev-log's compiled-build-only trigger).
-    #   (2) core_touched — this segment edited the plugin's OWN source. Worth
+    #   (2) readonly_fires — a substantial segment with ZERO file edits: long
+    #       investigation/debugging/recon sessions are exactly where diagnostic
+    #       techniques come from, and the edit floor would keep them from EVER
+    #       being distilled. Hermes triggers on accumulated tool iterations
+    #       alone; here the read-only path just carries a higher bar so short
+    #       Q&A turns still never nudge.
+    #   (3) core_touched — this segment edited the plugin's OWN source. Worth
     #       surfacing even for a tiny edit so the improvement can flow upstream
     #       (the "L1" advisory). PURELY INFORMATIONAL — it never auto-acts; the
     #       actual PR is opt-in and human-gated via /propose-plugin-improvement.
     nudge_fires = total_calls >= threshold and file_edits >= min_edits
-    if nudge_fires or core_touched:
+    readonly_fires = (file_edits == 0
+                      and total_calls >= _int_env("SIS_DISTILL_READONLY_THRESHOLD", 24))
+    if nudge_fires or readonly_fires or core_touched:
         parts = []
-        if nudge_fires:
-            parts.append((
+        if nudge_fires or readonly_fires:
+            msg = (
                 "이번 작업 구간에서 도구 호출이 {calls}회(파일 편집 {edits}회) 누적됐고 "
                 "아직 스킬로 증류되지 않았습니다. 종료하기 전에 /distill-skill 을 실행하거나 "
                 'self-improving-skills:skill-distiller 서브에이전트'
@@ -372,7 +380,23 @@ def main():
                 "- 한 번 쓰고 버릴 일회성 작업(특정 PR·특정 버그·환경 의존적 우회)이라면 "
                 "캡처하지 말고 그대로 종료하세요.\n"
                 "- 증류가 불필요하다고 판단되면, 그 이유를 사용자에게 한 줄로 알린 뒤 종료하세요."
-            ).format(calls=total_calls, edits=file_edits, tpath=path))
+            ).format(calls=total_calls, edits=file_edits, tpath=path)
+            if readonly_fires and not nudge_fires:
+                msg += ("\n\n이번 구간은 파일 편집이 없는 조사·디버깅 세션입니다 — 캡처 대상은 "
+                        "코드 변경이 아니라 진단 기법·커맨드 사다리·원인 규명 패턴입니다. "
+                        "그런 재사용 가능한 진단 지식이 없었다면 캡처하지 않는 것이 맞습니다.")
+            # M1: opt-in cost routing for the distiller subagent. The
+            # per-invocation model parameter beats the agent frontmatter, so no
+            # file change is needed — default (unset) inherits the main model.
+            model_pref = (os.environ.get("SIS_DISTILLER_MODEL") or "").strip().lower()
+            if model_pref and model_pref != "haiku":  # 정책: 서브에이전트 Haiku 금지
+                msg += ("\n\nSIS_DISTILLER_MODEL 이 설정되어 있습니다: 서브에이전트 호출에 "
+                        "model=\"{0}\" 파라미터를 포함하세요(호출 시 지정한 model 이 에이전트 "
+                        "frontmatter 보다 우선합니다).".format(model_pref))
+            msg += ("\n\n백그라운드 호출이 \"권한 분류기에 의해 차단됨\"으로 막히면 — 그게 auto "
+                    "mode 신호입니다. 플러그인 README 의 'auto mode' 섹션(permissions.allow "
+                    "5줄)을 참조해 사용자에게 1회 추가를 안내하세요.")
+            parts.append(msg)
         if core_touched:
             parts.append(
                 "이번 구간이 self-improving-skills 코어 소스를 직접 수정했습니다. "
