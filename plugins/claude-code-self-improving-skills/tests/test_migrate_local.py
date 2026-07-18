@@ -167,6 +167,104 @@ def test_marketplace_registry_warns_but_not_modified(home):
     assert any("marketplace remove" in w for w in report.warnings)
 
 
+def test_preexisting_allow_duplicates_untouched_and_unreported(home):
+    """리네임과 무관한 기존 중복은 보존 — dry-run 미보고 변경이 apply 에서 생기면 안 됨."""
+    path = _write_settings(home, {
+        "permissions": {"allow": ["Read(x)", "Read(x)", "Read(y)"]},
+    })
+    before = path.read_text(encoding="utf-8")
+    report = migrate_local.run(apply=True)
+    assert report.changes == []
+    assert path.read_text(encoding="utf-8") == before
+    assert not list(path.parent.glob("*.bak-migration-*"))
+
+
+def test_rename_collision_in_allow_reported(home):
+    path = _write_settings(home, {
+        "permissions": {"allow": [
+            "Agent(self-improving-skills:skill-distiller)",
+            "Agent(claude-code-self-improving-skills:skill-distiller)",
+        ]},
+    })
+    report = migrate_local.run(apply=True)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["permissions"]["allow"] == \
+        ["Agent(claude-code-self-improving-skills:skill-distiller)"]
+    assert any("제거" in d for _, d in report.changes)
+
+
+def test_enabled_plugins_new_key_value_wins(home):
+    """사용자가 신 키를 명시적으로 꺼 뒀으면(False) 구 키(True)가 되살리면 안 됨."""
+    path = _write_settings(home, {
+        "enabledPlugins": {
+            "self-improving-skills@samton-claude": True,
+            "claude-code-self-improving-skills@samton-plugins": False,
+        },
+    })
+    migrate_local.run(apply=True)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["enabledPlugins"] == \
+        {"claude-code-self-improving-skills@samton-plugins": False}
+
+
+def test_extra_marketplaces_old_and_new_coexist(home):
+    path = _write_settings(home, {
+        "extraKnownMarketplaces": {
+            "samton-claude": {"source": {"source": "git", "url": "old"}},
+            "samton-plugins": {
+                "source": {"source": "git",
+                           "url": "https://github.com/samton-inc/samton-plugins.git"}
+            },
+        },
+    })
+    migrate_local.run(apply=True)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert list(data["extraKnownMarketplaces"]) == ["samton-plugins"]
+    assert data["extraKnownMarketplaces"]["samton-plugins"]["source"]["url"] == \
+        "https://github.com/samton-inc/samton-plugins.git"
+
+
+def test_codex_config_non_key_context_untouched(home):
+    """키가 아닌 문맥(주석·이메일)의 @samton-claude, 접두 일치 리포 URL은 오폭 금지."""
+    cfg = home / ".codex" / "config.toml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(
+        "# maintainer: dev@samton-claude.example\n"
+        '# see https://github.com/samton-inc/samton-claude-archive.git\n'
+        '[plugins."codex-self-improvement@samton-claude"]\n'
+        "enabled = true\n",
+        encoding="utf-8")
+    migrate_local.run(apply=True)
+    text = cfg.read_text(encoding="utf-8")
+    assert "dev@samton-claude.example" in text
+    assert "samton-claude-archive.git" in text
+    assert '[plugins."chatgpt-codex-self-improving-skills@samton-plugins"]' in text
+
+
+def test_codex_config_and_state_idempotent(home):
+    cfg = home / ".codex" / "config.toml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text('[marketplaces.samton-claude]\n'
+                   'source = "https://github.com/washcarnewcar/samton-claude.git"\n',
+                   encoding="utf-8")
+    (home / ".codex-self-improvement").mkdir()
+    first = migrate_local.run(apply=True)
+    assert first.changes
+    second = migrate_local.run(apply=True)
+    assert second.changes == []
+
+
+def test_backup_name_collision_gets_suffix(home):
+    skill = home / ".claude" / "skills" / "s" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("self-improving-skills:skill-distiller\n", encoding="utf-8")
+    existing = skill.with_name("SKILL.md.bak-migration-" + migrate_local.STAMP)
+    existing.write_text("먼저 있던 백업", encoding="utf-8")
+    migrate_local.run(apply=True)
+    assert existing.read_text(encoding="utf-8") == "먼저 있던 백업"
+    assert (skill.parent / ("SKILL.md.bak-migration-" + migrate_local.STAMP + "-2")).exists()
+
+
 def test_idempotent_second_run(home):
     _write_settings(home, SETTINGS)
     skill = home / ".claude" / "skills" / "s" / "SKILL.md"

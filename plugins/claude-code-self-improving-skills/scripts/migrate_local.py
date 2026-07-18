@@ -100,9 +100,18 @@ class Report:
         self.warnings.append(msg)
 
 
+def _backup_path(path: Path) -> Path:
+    base = path.with_name(path.name + ".bak-migration-" + STAMP)
+    cand, i = base, 2
+    while cand.exists():
+        cand = path.with_name(base.name + "-" + str(i))
+        i += 1
+    return cand
+
+
 def _backup_and_write(path: Path, new_text: str, report: Report):
     if report.apply:
-        shutil.copy2(path, path.with_name(path.name + ".bak-migration-" + STAMP))
+        shutil.copy2(path, _backup_path(path))
         path.write_text(new_text, encoding="utf-8")
 
 
@@ -116,8 +125,9 @@ def _rename_plugin_id(plugin_id: str) -> str:
 
 
 def _rewrite_url(url: str) -> str:
+    # 경계 앵커: samton-claude-archive 같은 접두 일치 리포를 오폭하지 않도록
     for old, new in URL_RENAMES.items():
-        url = url.replace(old, new)
+        url = re.sub(re.escape(old) + r"(?![A-Za-z0-9-])", new, url)
     return url
 
 
@@ -139,6 +149,8 @@ def migrate_settings(report: Report):
 
     allow = data.get("permissions", {}).get("allow")
     if isinstance(allow, list):
+        # 리네임과 무관한 기존 항목(중복 포함)은 그대로 보존한다 — dry-run 이 보고하지
+        # 않은 변경이 apply 에서 생기면 안 됨. 리네임이 만든 중복만 제거·보고.
         new_allow = []
         for rule in allow:
             new_rule = rule
@@ -146,9 +158,12 @@ def migrate_settings(report: Report):
                 for rx, repl in ns_rules:
                     new_rule = rx.sub(repl, new_rule)
             if new_rule != rule:
+                if new_rule in allow or new_rule in new_allow:
+                    report.change(path, "permissions.allow: {0} 제거 (동일 규칙 {1} 이미 존재)"
+                                  .format(rule, new_rule))
+                    continue
                 report.change(path, "permissions.allow: {0} -> {1}".format(rule, new_rule))
-            if new_rule not in new_allow:
-                new_allow.append(new_rule)
+            new_allow.append(new_rule)
         data["permissions"]["allow"] = new_allow
 
     enabled = data.get("enabledPlugins")
@@ -157,10 +172,13 @@ def migrate_settings(report: Report):
         for key, val in enabled.items():
             new_key = _rename_plugin_id(key)
             if new_key != key:
+                if new_key in enabled or new_key in new_enabled:
+                    # 신 키가 이미 있으면 그 값(사용자의 명시적 on/off)이 권위값 — 구 키는 버림
+                    report.change(path, "enabledPlugins: {0} 제거 (신 키 {1} 이미 존재, 그 값 유지)"
+                                  .format(key, new_key))
+                    continue
                 report.change(path, "enabledPlugins: {0} -> {1}".format(key, new_key))
-            if new_key in new_enabled:
-                new_enabled[new_key] = new_enabled[new_key] or val
-            else:
+            if new_key not in new_enabled:
                 new_enabled[new_key] = val
         data["enabledPlugins"] = new_enabled
 
@@ -218,8 +236,11 @@ def migrate_codex_config(report: Report):
     for old_m, new_m in MARKETPLACE_RENAMES.items():
         new_text = new_text.replace("[marketplaces." + old_m + "]",
                                     "[marketplaces." + new_m + "]")
-        # 리네임 안 된 플러그인의 '@samton-claude' 잔여 키까지 새 마켓플레이스로
-        new_text = new_text.replace("@" + old_m, "@" + new_m)
+        # 리네임 안 된 플러그인의 '@samton-claude' 잔여 키까지 새 마켓플레이스로.
+        # codex 키는 항상 '"...@마켓"' 또는 '"...@마켓:hooks/..."' 형태 — 뒤 경계를
+        # ["':] 로 앵커링해 주석·이메일 등 키가 아닌 문맥의 오폭을 막는다.
+        new_text = re.sub("@" + re.escape(old_m) + r'(?=["\':])',
+                          "@" + new_m, new_text)
     new_text = _rewrite_url(new_text)
     if new_text != text:
         report.change(path, "plugin/marketplace 키·URL 을 새 이름으로 치환")
