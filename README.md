@@ -97,7 +97,7 @@ codex plugin marketplace add UniM0cha/self-improving-skills
 codex plugin add chatgpt-codex-self-improving-skills@self-improving-skills
 ```
 
-The ChatGPT Work variant is restricted to `products: ["CHATGPT"]`, so Codex CLI cannot install it. Restart the ChatGPT desktop app, open Work mode's Plugins, choose `Self-Improving Skills`, and install `chatgpt-work-self-improving-skills` there.
+The ChatGPT desktop Plugins Directory currently shows both variants together. Choose `chatgpt-codex-self-improving-skills` in Codex and `chatgpt-work-self-improving-skills` in Work mode. The current desktop app does not reliably separate the two surfaces with marketplace `policy.products`.
 
 For an existing installation, refresh the marketplace and reinstall the plugin:
 
@@ -106,7 +106,7 @@ codex plugin marketplace upgrade self-improving-skills
 codex plugin add chatgpt-codex-self-improving-skills@self-improving-skills
 ```
 
-After upgrading, restart the ChatGPT desktop app so Work reloads the marketplace. Start a new Codex task for the Codex variant, or install and use the Work variant from Work mode's Plugins. See the [official plugin documentation](https://learn.chatgpt.com/docs/build-plugins) for the marketplace format.
+After upgrading, restart the ChatGPT desktop app so it reloads the marketplace. Both variants appear under `Self-Improving Skills`; install the one for the mode you are using. See the [official plugin documentation](https://learn.chatgpt.com/docs/build-plugins) for the marketplace format.
 
 ## Configuration
 

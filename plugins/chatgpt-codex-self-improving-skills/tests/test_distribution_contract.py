@@ -40,9 +40,9 @@ def test_modern_marketplace_points_to_the_codex_plugin():
     assert entry["policy"] == {
         "installation": "AVAILABLE",
         "authentication": "ON_INSTALL",
-        "products": ["CODEX"],
     }
     assert entry["category"] == manifest["interface"]["category"] == "Engineering"
+    assert "products" not in entry["policy"]
     assert "version" not in entry
 
 

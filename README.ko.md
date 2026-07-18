@@ -97,7 +97,7 @@ codex plugin marketplace add UniM0cha/self-improving-skills
 codex plugin add chatgpt-codex-self-improving-skills@self-improving-skills
 ```
 
-ChatGPT Work 변형은 `products: ["CHATGPT"]`로 제한되어 Codex CLI에서 설치할 수 없습니다. ChatGPT 데스크톱 앱을 재시작한 뒤 Work 모드의 Plugins에서 `Self-Improving Skills` → `chatgpt-work-self-improving-skills`를 설치하세요.
+ChatGPT 데스크톱 앱의 Plugins Directory에는 현재 두 변형이 함께 표시됩니다. Codex에서는 `chatgpt-codex-self-improving-skills`, Work 모드에서는 `chatgpt-work-self-improving-skills`를 선택하세요. 현행 데스크톱 앱에서는 marketplace의 `policy.products`로 두 화면이 안정적으로 분리되지 않습니다.
 
 기존 설치를 최신 marketplace 구조와 버전으로 갱신하려면 다음을 실행하세요:
 
@@ -106,7 +106,7 @@ codex plugin marketplace upgrade self-improving-skills
 codex plugin add chatgpt-codex-self-improving-skills@self-improving-skills
 ```
 
-갱신 후 Work가 marketplace를 다시 읽도록 ChatGPT 데스크톱 앱을 재시작하세요. Codex 변형은 새 Codex 작업에서, Work 변형은 Work 모드의 Plugins에서 설치·사용합니다. marketplace 형식은 [공식 플러그인 문서](https://learn.chatgpt.com/docs/build-plugins)를 참고할 수 있습니다.
+갱신 후 ChatGPT 데스크톱 앱이 marketplace를 다시 읽도록 재시작하세요. `Self-Improving Skills` 아래에 두 변형이 함께 나타나며, 사용하는 모드에 맞는 플러그인을 설치하면 됩니다. marketplace 형식은 [공식 플러그인 문서](https://learn.chatgpt.com/docs/build-plugins)를 참고할 수 있습니다.
 
 ## 설정
 

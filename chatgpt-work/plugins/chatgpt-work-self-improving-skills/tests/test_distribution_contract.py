@@ -55,7 +55,7 @@ def test_manifest_is_skills_only_and_work_ready():
         assert not forbidden_path.exists()
 
 
-def test_repo_marketplace_exposes_one_chatgpt_only_entry():
+def test_repo_marketplace_exposes_one_work_entry_without_product_gating():
     marketplace = load_json(MARKETPLACE_PATH)
     manifest = load_json(MANIFEST_PATH)
     matches = [
@@ -76,9 +76,9 @@ def test_repo_marketplace_exposes_one_chatgpt_only_entry():
     assert entry["policy"] == {
         "installation": "AVAILABLE",
         "authentication": "ON_INSTALL",
-        "products": ["CHATGPT"],
     }
     assert entry["category"] == manifest["interface"]["category"] == "Productivity"
+    assert "products" not in entry["policy"]
     assert "version" not in entry
     assert not NESTED_MARKETPLACE_PATH.exists()
 

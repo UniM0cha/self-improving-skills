@@ -12,8 +12,7 @@
       },
       "policy": {
         "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL",
-        "products": ["CODEX"]
+        "authentication": "ON_INSTALL"
       },
       "category": "Engineering"
     },
@@ -25,8 +24,7 @@
       },
       "policy": {
         "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL",
-        "products": ["CHATGPT"]
+        "authentication": "ON_INSTALL"
       },
       "category": "Productivity"
     }
