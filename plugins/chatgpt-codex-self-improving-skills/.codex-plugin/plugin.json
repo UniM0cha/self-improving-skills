@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-codex-self-improving-skills",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Hermes-inspired self-improvement loop for Codex skills, with turn hooks, skill telemetry, backups, and curator tooling.",
   "author": {
     "name": "Samton"
@@ -16,7 +16,6 @@
     "memory"
   ],
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex Self Improvement",

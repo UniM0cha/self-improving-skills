@@ -1,6 +1,6 @@
 ---
 name: codex-skill-curator
-description: Curate Codex skills with a Hermes-style maintenance pass: usage telemetry, stale/archive candidates, pins, backups, dry-run reports, and rollback guidance.
+description: "Curate Codex skills with a Hermes-style maintenance pass: usage telemetry, stale/archive candidates, pins, backups, dry-run reports, and rollback guidance."
 ---
 
 # Codex Skill Curator
@@ -44,4 +44,3 @@ python3 ../../scripts/skill_manager_cli.py status
 ```
 
 Resolve script paths relative to this `SKILL.md` location.
-

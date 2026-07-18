@@ -77,6 +77,8 @@ Skills are *instructions to an agent* — i.e. a prompt-injection vector — so 
 
 ## Install
 
+### Claude Code
+
 Add this repository as a Claude Code plugin marketplace from inside Claude Code:
 
 ```text
@@ -85,6 +87,24 @@ Add this repository as a Claude Code plugin marketplace from inside Claude Code:
 ```
 
 If your Claude Code version uses a different plugin command shape, add `https://github.com/UniM0cha/self-improving-skills` as a marketplace from Claude Code's plugin UI and install the `claude-code-self-improving-skills` plugin.
+
+### Codex
+
+Add this repository as a Codex plugin marketplace, then install the Codex variant:
+
+```bash
+codex plugin marketplace add UniM0cha/self-improving-skills
+codex plugin add chatgpt-codex-self-improving-skills@self-improving-skills
+```
+
+For an existing installation, refresh the marketplace and reinstall the plugin:
+
+```bash
+codex plugin marketplace upgrade self-improving-skills
+codex plugin add chatgpt-codex-self-improving-skills@self-improving-skills
+```
+
+Start a new Codex task after installing or upgrading. See the [official Codex plugin documentation](https://developers.openai.com/codex/plugins/build) for the marketplace format.
 
 ## Configuration
 
@@ -125,7 +145,8 @@ The learned skills live in your user directory, not inside the plugin. Updating 
 ## Repository layout
 
 ```text
-.claude-plugin/marketplace.json          # Claude Code marketplace manifest (3 plugins)
+.claude-plugin/marketplace.json          # Claude Code marketplace manifest (2 plugins)
+.agents/plugins/marketplace.json         # Codex marketplace manifest
 chatgpt-work/                            # ChatGPT Work marketplace (samton-chatgpt) + plugin
 plugins/claude-cowork-self-improving-skills/   # Cowork variant
 plugins/chatgpt-codex-self-improving-skills/   # Codex variant

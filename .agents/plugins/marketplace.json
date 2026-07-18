@@ -1,14 +1,14 @@
 {
-  "name": "samton-plugins",
+  "name": "self-improving-skills",
   "interface": {
-    "displayName": "Samton Plugins"
+    "displayName": "Self-Improving Skills"
   },
   "plugins": [
     {
       "name": "chatgpt-codex-self-improving-skills",
       "source": {
         "source": "local",
-        "path": "."
+        "path": "./plugins/chatgpt-codex-self-improving-skills"
       },
       "policy": {
         "installation": "AVAILABLE",
