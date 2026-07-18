@@ -1,0 +1,52 @@
+{
+  "description": "Cowork 자기개선 루프: 첫 프롬프트에서 세션 안내 주입(UserPromptSubmit — 콜드 컨테이너의 SessionStart×플러그인 동기화 race 회피) + 복잡한 구간 종료 시 증류·저장 유도(Stop) + 학습 스킬 백업/검증(PreToolUse/PostToolUse)",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/session-advisory.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/distill-nudge.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/backup-skill.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/validate-skill.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+interface:
+  display_name: "Skill Curator"
+  short_description: "Dry-run and maintain Codex skills"
+  default_prompt: "Curate my Codex skills in dry-run mode."
+policy:
+  allow_implicit_invocation: true
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "self-improving-skills"
+      description: "Skill manager MCP server bundled with this plugin."

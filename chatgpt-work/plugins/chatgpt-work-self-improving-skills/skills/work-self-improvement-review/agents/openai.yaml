@@ -1,0 +1,6 @@
+interface:
+  display_name: "Work Self Improvement Review"
+  short_description: "Review work and propose reusable guidance"
+  default_prompt: "Use @work-self-improvement-review to find durable lessons from this completed task."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "self-improving-skills": {
+      "command": "python3",
+      "args": [
+        "./scripts/skill_manager_mcp.py"
+      ],
+      "cwd": ".",
+      "note": "Local skill-manager MCP for Codex self-improvement. Provides safe skill list/view/create/patch/write/archive/curate/backup/rollback/scan tools with usage telemetry and a read-before-write guard. Startup depends on the plugin-root cwd contract (cwd: '.'); if PLUGIN_ROOT is absent the server falls back to resolving paths from its own file location — do not replace args with env-var substitutions (not a verified Codex contract)."
+    }
+  }
+}

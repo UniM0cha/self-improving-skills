@@ -1,17 +1,39 @@
 {
-  "name": "claude-self-improving-skills",
+  "name": "self-improving-skills",
   "owner": {
     "name": "이정윤"
   },
   "metadata": {
-    "description": "Hermes Agent-style self-improvement for Claude Code: distill complex work into reusable skills, validate edits, and curate stale knowledge."
+    "description": "Hermes Agent-style self-improvement loops for Claude Code, Claude Cowork, Codex, and ChatGPT work: distill complex work into reusable skills, validate edits, and curate stale knowledge."
   },
   "plugins": [
     {
-      "name": "self-improving-skills",
-      "source": "./plugins/self-improving-skills",
+      "name": "claude-code-self-improving-skills",
+      "source": "./plugins/claude-code-self-improving-skills",
       "description": "Hermes Agent-style self-improvement for Claude Code: automatically distill complex work into SKILL.md and improve skills over time.",
-      "version": "0.10.0",
+      "version": "0.11.0",
+      "author": {
+        "name": "이정윤"
+      },
+      "license": "MIT",
+      "category": "development"
+    },
+    {
+      "name": "claude-cowork-self-improving-skills",
+      "source": "./plugins/claude-cowork-self-improving-skills",
+      "description": "Cowork (cloud container) variant of claude-code-self-improving-skills: persists distilled skills to claude.ai via SendUserFile → '스킬 저장', and avoids the cold-container SessionStart × plugin-sync race.",
+      "version": "0.2.0",
+      "author": {
+        "name": "이정윤"
+      },
+      "license": "MIT",
+      "category": "development"
+    },
+    {
+      "name": "chatgpt-codex-self-improving-skills",
+      "source": "./plugins/chatgpt-codex-self-improving-skills",
+      "description": "Codex hook + MCP based self-improvement loop: turn review, skill telemetry, backups, pin, archive, and a dry-run curator.",
+      "version": "0.3.0",
       "author": {
         "name": "이정윤"
       },

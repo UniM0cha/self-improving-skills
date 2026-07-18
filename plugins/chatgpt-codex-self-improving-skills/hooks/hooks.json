@@ -1,0 +1,42 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/scripts/session_start.py\"",
+            "timeout": 10,
+            "statusMessage": "Loading self-improvement status"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/scripts/post_tool_use.py\"",
+            "timeout": 20,
+            "statusMessage": "Recording self-improvement telemetry"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/scripts/stop_review.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking self-improvement signal"
+          }
+        ]
+      }
+    ]
+  }
+}

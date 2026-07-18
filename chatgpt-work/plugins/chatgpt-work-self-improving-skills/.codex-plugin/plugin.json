@@ -1,0 +1,35 @@
+{
+  "name": "chatgpt-work-self-improving-skills",
+  "version": "0.1.0",
+  "description": "Review ChatGPT Work conversations for durable lessons and export approved guidance without local hooks or background state.",
+  "author": {
+    "name": "Samton",
+    "email": "solstice@samton.co.kr"
+  },
+  "homepage": "https://github.com/samton-inc/samton-plugins",
+  "repository": "https://github.com/samton-inc/samton-plugins",
+  "license": "MIT",
+  "keywords": [
+    "chatgpt-work",
+    "self-improvement",
+    "skills",
+    "review",
+    "guidance"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "ChatGPT Work Self Improvement",
+    "shortDescription": "작업을 검토해 재사용 가능한 개선안을 제안",
+    "longDescription": "현재 Work 대화와 제공된 파일에서 반복 가능한 교훈을 찾고, 사용자 승인 후 프로젝트 지침·overlay·SKILL.md 패치로 내보냅니다. 로컬 훅, 로컬 MCP, 백그라운드 telemetry에 의존하지 않습니다.",
+    "developerName": "Samton",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "이번 작업에서 다른 작업에도 재사용할 수 있는 개선점만 검토해 주세요.",
+      "승인한 개선점을 프로젝트 지침용 문구로 만들어 주세요.",
+      "이 개선점을 유지관리자용 SKILL.md 패치로 만들어 주세요."
+    ]
+  }
+}

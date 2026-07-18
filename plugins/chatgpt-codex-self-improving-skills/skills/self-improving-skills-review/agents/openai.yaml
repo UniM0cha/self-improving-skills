@@ -1,0 +1,11 @@
+interface:
+  display_name: "Self-Improvement Review"
+  short_description: "Turn review for durable skill updates"
+  default_prompt: "Review this thread for durable Codex skill improvements."
+policy:
+  allow_implicit_invocation: true
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "self-improving-skills"
+      description: "Skill manager MCP server bundled with this plugin."

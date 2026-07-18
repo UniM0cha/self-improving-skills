@@ -1,0 +1,43 @@
+{
+  "name": "chatgpt-codex-self-improving-skills",
+  "version": "0.3.0",
+  "description": "Hermes-inspired self-improvement loop for Codex skills, with turn hooks, skill telemetry, backups, and curator tooling.",
+  "author": {
+    "name": "Samton"
+  },
+  "homepage": "https://github.com/samton-inc/samton-plugins",
+  "repository": "https://github.com/samton-inc/samton-plugins",
+  "license": "MIT",
+  "keywords": [
+    "skills",
+    "self-improvement",
+    "hooks",
+    "curator",
+    "memory"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Codex Self Improvement",
+    "shortDescription": "Review turns and maintain Codex skills safely",
+    "longDescription": "Codex Self Improvement packages a Hermes-inspired learning loop: lifecycle hooks record tool usage and optionally trigger review, skills guide safe skill updates, and a local skill manager keeps backups, provenance, pins, archives, and curator reports.",
+    "developerName": "Samton",
+    "category": "Engineering",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/samton-inc/samton-plugins",
+    "privacyPolicyURL": "https://github.com/samton-inc/samton-plugins",
+    "termsOfServiceURL": "https://github.com/samton-inc/samton-plugins",
+    "defaultPrompt": [
+      "Run a self-improvement review for this thread.",
+      "Curate my Codex skills in dry-run mode.",
+      "Create a reusable skill from this workflow."
+    ],
+    "brandColor": "#2563EB",
+    "screenshots": []
+  }
+}

@@ -1,8 +1,8 @@
-# Claude Self-Improving Skills
+# Self-Improving Skills
 
 **English** | [한국어](README.ko.md)
 
-> **Hermes Agent-style self-improvement for Claude Code.**
+> **Hermes Agent-style self-improvement for Claude Code, Claude Cowork, Codex, and ChatGPT work.**
 >
 > It turns hard-won workflow lessons into reusable `SKILL.md` files, validates skill edits, curates stale knowledge, and (since v0.9.0) lets a team share learned skills through a git repo — without ever overwriting anyone's personal customizations.
 
@@ -11,6 +11,19 @@ Claude Code already has hooks, subagents, slash commands, and skills. This plugi
 ```text
 complex task → distill what worked → save/patch a skill → rediscover next session
 ```
+
+## Variants
+
+One repo, four ports of the same closed learning loop:
+
+| Plugin | Environment |
+|---|---|
+| `claude-code-self-improving-skills` | Claude Code CLI (this README's main subject) |
+| `claude-cowork-self-improving-skills` | Claude Cowork (cloud container) — persists skills via claude.ai '스킬 저장' |
+| `chatgpt-codex-self-improving-skills` | OpenAI Codex CLI (hooks + MCP skill manager) |
+| `chatgpt-work-self-improving-skills` | ChatGPT desktop Work (skills-only package, under `chatgpt-work/`) |
+
+Install one per environment — do not install two variants into the same environment (duplicate hooks/nudges).
 
 ## Why this exists
 
@@ -67,11 +80,11 @@ Skills are *instructions to an agent* — i.e. a prompt-injection vector — so 
 Add this repository as a Claude Code plugin marketplace from inside Claude Code:
 
 ```text
-/plugin marketplace add UniM0cha/claude-self-improving-skills
-/plugin install self-improving-skills@claude-self-improving-skills
+/plugin marketplace add UniM0cha/self-improving-skills
+/plugin install claude-code-self-improving-skills@self-improving-skills
 ```
 
-If your Claude Code version uses a different plugin command shape, add `https://github.com/UniM0cha/claude-self-improving-skills` as a marketplace from Claude Code's plugin UI and install the `self-improving-skills` plugin.
+If your Claude Code version uses a different plugin command shape, add `https://github.com/UniM0cha/self-improving-skills` as a marketplace from Claude Code's plugin UI and install the `claude-code-self-improving-skills` plugin.
 
 ## Configuration
 
@@ -98,7 +111,7 @@ Stop hook parses the transcript and usage offsets
   ↓
 If the work was complex and not yet distilled, it returns a one-time block
   ↓
-Claude delegates to self-improving-skills:skill-distiller (background)
+Claude delegates to claude-code-self-improving-skills:skill-distiller (background)
   ↓
 The distiller patches or creates a reusable SKILL.md under ~/.claude/skills
   ↓
@@ -112,8 +125,11 @@ The learned skills live in your user directory, not inside the plugin. Updating 
 ## Repository layout
 
 ```text
-.claude-plugin/marketplace.json          # single-plugin Claude Code marketplace manifest
-plugins/self-improving-skills/
+.claude-plugin/marketplace.json          # Claude Code marketplace manifest (3 plugins)
+chatgpt-work/                            # ChatGPT Work marketplace (samton-chatgpt) + plugin
+plugins/claude-cowork-self-improving-skills/   # Cowork variant
+plugins/chatgpt-codex-self-improving-skills/   # Codex variant
+plugins/claude-code-self-improving-skills/
   .claude-plugin/plugin.json             # plugin metadata
   hooks/                                 # Stop, SessionStart, PreToolUse, PostToolUse wrappers
   scripts/                               # transcript analysis, telemetry, curator, validator,
