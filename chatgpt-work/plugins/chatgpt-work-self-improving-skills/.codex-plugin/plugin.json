@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-work-self-improving-skills",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Review ChatGPT Work conversations for durable lessons and export approved guidance without local hooks or background state.",
   "author": {
     "name": "Samton",

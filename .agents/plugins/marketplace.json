@@ -12,9 +12,23 @@
       },
       "policy": {
         "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
+        "authentication": "ON_INSTALL",
+        "products": ["CODEX"]
       },
       "category": "Engineering"
+    },
+    {
+      "name": "chatgpt-work-self-improving-skills",
+      "source": {
+        "source": "local",
+        "path": "./chatgpt-work/plugins/chatgpt-work-self-improving-skills"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL",
+        "products": ["CHATGPT"]
+      },
+      "category": "Productivity"
     }
   ]
 }

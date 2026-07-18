@@ -88,7 +88,7 @@ Add this repository as a Claude Code plugin marketplace from inside Claude Code:
 
 If your Claude Code version uses a different plugin command shape, add `https://github.com/UniM0cha/self-improving-skills` as a marketplace from Claude Code's plugin UI and install the `claude-code-self-improving-skills` plugin.
 
-### Codex
+### Codex and ChatGPT Work
 
 Add this repository as a Codex plugin marketplace, then install the Codex variant:
 
@@ -97,6 +97,8 @@ codex plugin marketplace add UniM0cha/self-improving-skills
 codex plugin add chatgpt-codex-self-improving-skills@self-improving-skills
 ```
 
+The ChatGPT Work variant is restricted to `products: ["CHATGPT"]`, so Codex CLI cannot install it. Restart the ChatGPT desktop app, open Work mode's Plugins, choose `Self-Improving Skills`, and install `chatgpt-work-self-improving-skills` there.
+
 For an existing installation, refresh the marketplace and reinstall the plugin:
 
 ```bash
@@ -104,7 +106,7 @@ codex plugin marketplace upgrade self-improving-skills
 codex plugin add chatgpt-codex-self-improving-skills@self-improving-skills
 ```
 
-Start a new Codex task after installing or upgrading. See the [official Codex plugin documentation](https://developers.openai.com/codex/plugins/build) for the marketplace format.
+After upgrading, restart the ChatGPT desktop app so Work reloads the marketplace. Start a new Codex task for the Codex variant, or install and use the Work variant from Work mode's Plugins. See the [official plugin documentation](https://learn.chatgpt.com/docs/build-plugins) for the marketplace format.
 
 ## Configuration
 
@@ -146,8 +148,8 @@ The learned skills live in your user directory, not inside the plugin. Updating 
 
 ```text
 .claude-plugin/marketplace.json          # Claude Code marketplace manifest (2 plugins)
-.agents/plugins/marketplace.json         # Codex marketplace manifest
-chatgpt-work/                            # ChatGPT Work marketplace (samton-chatgpt) + plugin
+.agents/plugins/marketplace.json         # Codex + ChatGPT Work marketplace manifest
+chatgpt-work/                            # Work plugin source, registered by the root marketplace
 plugins/claude-cowork-self-improving-skills/   # Cowork variant
 plugins/chatgpt-codex-self-improving-skills/   # Codex variant
 plugins/claude-code-self-improving-skills/

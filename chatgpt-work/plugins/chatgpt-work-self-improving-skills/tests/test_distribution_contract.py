@@ -8,9 +8,11 @@ import yaml
 PLUGIN_NAME = "chatgpt-work-self-improving-skills"
 SKILL_NAME = "work-self-improvement-review"
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = PLUGIN_ROOT.parents[1]
+WORK_ROOT = PLUGIN_ROOT.parents[1]
+REPO_ROOT = PLUGIN_ROOT.parents[2]
 MANIFEST_PATH = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 MARKETPLACE_PATH = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
+NESTED_MARKETPLACE_PATH = WORK_ROOT / ".agents" / "plugins" / "marketplace.json"
 SEMVER_RE = re.compile(
     r"^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:[-+][0-9A-Za-z.-]+)?$"
 )
@@ -53,29 +55,32 @@ def test_manifest_is_skills_only_and_work_ready():
         assert not forbidden_path.exists()
 
 
-def test_modern_marketplace_has_one_available_local_entry():
+def test_repo_marketplace_exposes_one_chatgpt_only_entry():
     marketplace = load_json(MARKETPLACE_PATH)
+    manifest = load_json(MANIFEST_PATH)
     matches = [
         plugin
         for plugin in marketplace["plugins"]
         if plugin["name"] == PLUGIN_NAME
     ]
 
-    assert marketplace["name"] == "samton-chatgpt"
-    assert marketplace["interface"]["displayName"]
+    assert marketplace["name"] == "self-improving-skills"
+    assert marketplace["interface"]["displayName"] == "Self-Improving Skills"
     assert len(matches) == 1
     entry = matches[0]
+    assert entry["name"] == manifest["name"] == PLUGIN_ROOT.name
     assert entry["source"] == {
         "source": "local",
-        "path": "./plugins/chatgpt-work-self-improving-skills",
+        "path": "./chatgpt-work/plugins/chatgpt-work-self-improving-skills",
     }
     assert entry["policy"] == {
         "installation": "AVAILABLE",
         "authentication": "ON_INSTALL",
+        "products": ["CHATGPT"],
     }
-    assert entry["category"] == "Productivity"
-    assert "products" not in entry["policy"]
+    assert entry["category"] == manifest["interface"]["category"] == "Productivity"
     assert "version" not in entry
+    assert not NESTED_MARKETPLACE_PATH.exists()
 
 
 def test_skill_metadata_and_work_invocation_contract():
