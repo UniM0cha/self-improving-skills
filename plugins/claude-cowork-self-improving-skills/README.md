@@ -51,7 +51,7 @@ SendUserFile 로 SKILL.md 를 사용자에게 전송
 
 - **교체**: SessionStart 훅 → UserPromptSubmit 훅(첫 프롬프트 1회) + Stop 훅 fallback.
 - **추가**: `/save-skill`, `/loop-status`, 예약어 이름 경고(PostToolUse), nudge·distiller의 "SendUserFile → 스킬 저장" 단계.
-- **제외**: 큐레이터 계열 7종(`/curate-skills`, `/curator-status`, `/prune-skills`, `/pin-skill`, `/archive-skill`, `/restore-skill`, `/curator-rollback`) — 세션별 상태 리셋으로 시간 기반 정리가 무의미하며, 라이브러리 관리는 claude.ai 설정 > 스킬에서 합니다. 팀 스킬 동기화(`/share-skill`, `/sync-team-skills`)와 upstream PR(`/propose-plugin-improvement`)도 제외(필요 시 원본 참조). `validate_skill.py`의 팀 관련 분기는 원본과의 diff 최소화를 위해 남아 있으나 team 모듈이 없어 항상 비활성입니다.
+- **제외**: 큐레이터 계열 7종(`/curate-skills`, `/curator-status`, `/prune-skills`, `/pin-skill`, `/archive-skill`, `/restore-skill`, `/curator-rollback`) — 세션별 상태 리셋으로 시간 기반 정리가 무의미하며, 라이브러리 관리는 claude.ai 설정 > 스킬에서 합니다. upstream PR(`/propose-plugin-improvement`)도 제외(필요 시 원본 참조).
 - **커맨드 형식**: 레거시 `commands/*.md` 대신 `skills/*/SKILL.md`(Cowork 권장 형식).
 
 ## 설치
