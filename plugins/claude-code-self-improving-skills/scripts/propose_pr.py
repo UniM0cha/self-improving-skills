@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """propose_pr.py — generic, mechanical git/gh PR plumbing.
 
-Parameterized generalization of the original propose_plugin_pr.py so BOTH
-upstream flows share one verified implementation:
+Parameterized generalization of the original propose_plugin_pr.py:
   - core-plugin contributions  (propose_plugin_pr.py adapter, SIS_PLUGIN_PR gate)
-  - team-skill sharing         (/share-skill -> the user's configured team repo)
 
 It NEVER decides WHAT to change — the calling agent edits the clone between
 the two phases. Invariants (inherited from the original, all preserved):

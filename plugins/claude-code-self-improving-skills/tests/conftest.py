@@ -28,14 +28,10 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     import curator_backup
     import curator_transitions
-    import team_manifest
-    import team_sync
     import usage_store
     importlib.reload(usage_store)
     importlib.reload(curator_backup)
     importlib.reload(curator_transitions)
-    importlib.reload(team_manifest)
-    importlib.reload(team_sync)
 
     skills = tmp_path / ".claude" / "skills"
     skills.mkdir(parents=True)
@@ -54,8 +50,6 @@ def sandbox(tmp_path, monkeypatch):
         make_skill=make_skill,
         usage_store=usage_store,
         curator=curator_transitions,
-        team_manifest=team_manifest,
-        team_sync=team_sync,
     )
 
 

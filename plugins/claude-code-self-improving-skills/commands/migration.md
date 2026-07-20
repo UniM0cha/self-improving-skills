@@ -15,7 +15,12 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/migrate_local.py
 출력을 사용자에게 그대로 보여 주세요. 대상: `~/.claude/settings.json`(permissions.allow
 네임스페이스·enabledPlugins 키·extraKnownMarketplaces stale URL), `~/.claude/skills`의
 학습 스킬 본문 참조, `~/.codex/config.toml`, codex 상태 디렉토리(`~/.codex-self-improvement`
-→ `~/.self-improving-skills`)와 codex 증류 스킬 provenance.
+→ `~/.self-improving-skills`)와 codex 증류 스킬 provenance, 그리고 팀 공유 기능
+제거(v0.12.0)에 따른 `skill_usage.json`의 `created_by: team` → `agent` 전환.
+
+`team_sync.json`·`team_config.json`·`team_quarantine/` 이 남아 있으면 "더 이상
+사용되지 않음 — 수동 삭제 안전" 경고가 나옵니다. 스크립트는 사용자 데이터를 삭제하지
+않으므로, 원하면 사용자가 직접 지우도록 안내하세요.
 
 `provenance: self-improving-skills` 마커는 리네임과 무관하게 유지되는 값이므로 변경
 목록에 나타나지 않는 것이 정상입니다.

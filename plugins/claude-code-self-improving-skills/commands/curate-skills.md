@@ -31,7 +31,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/curator_transitions.py mark-curated
 
 ### 2. Hard rules — 위반 금지
 
-1. **`created_by: agent`인 스킬만 건드립니다.** 사용자 작성(user)·팀 동기화(team)·타 플러그인 스킬은 절대 수정·아카이브·통합하지 않습니다.
+1. **`created_by: agent`인 스킬만 건드립니다.** 사용자 작성(user)·타 플러그인 스킬은 절대 수정·아카이브·통합하지 않습니다.
 2. **삭제 금지.** 아카이브(`.archive/`로 이동, `/restore-skill`로 복구 가능)가 최대 파괴 행위입니다.
 3. **`pinned: true` 스킬은 통째로 스킵합니다.**
 4. **use_count를 통합 회피나 아카이브의 근거로 쓰지 마세요.** 카운터는 최근 도입됐고 대부분 0입니다. `use=0`은 "가치 없음"의 증거가 아니라 **증거의 부재**입니다. 겹침 판단은 빈도가 아니라 **내용**으로 하세요. (미사용 기반 정리는 시간 기반 상태머신이 이미 담당합니다 — 이 패스의 일이 아닙니다.) 단, 통합 시 "어느 쪽을 기준으로 삼을지"의 참고로는 쓰세요.
@@ -51,7 +51,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/curator_transitions.py mark-curated
    python3 ${CLAUDE_PLUGIN_ROOT}/scripts/curator_transitions.py archive "<흡수된-스킬>" "<umbrella-스킬>"
    ```
 
-   명령이 `ok: false`를 반환하면 그대로 따르세요: `umbrella not found`면 **umbrella 스킬을 먼저 만들거나 patch한 뒤 재시도**하고, pinned·user·team 거부는 정상 보호 동작입니다(`--force`는 사람이 직접 결정할 때만).
+   명령이 `ok: false`를 반환하면 그대로 따르세요: `umbrella not found`면 **umbrella 스킬을 먼저 만들거나 patch한 뒤 재시도**하고, pinned·user 거부는 정상 보호 동작입니다(`--force`는 사람이 직접 결정할 때만).
 
 5. 통합 후 umbrella의 `description`이 합쳐진 범위를 정확히 반영하도록 갱신하세요.
 

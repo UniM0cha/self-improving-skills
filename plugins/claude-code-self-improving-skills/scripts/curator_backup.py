@@ -31,12 +31,8 @@ STATE_DIR = os.path.expanduser("~/.claude/self-improve")
 BACKUP_DIR = os.path.join(STATE_DIR, "curator_backups")
 KEEP = 5
 EXCLUDE_DIRS = {".git", "__pycache__", "node_modules"}
-# team_sync.json rides along because the tree includes team-managed skills:
-# restoring old content while keeping a NEWER origin_hash would make the next
-# sync misread the rollback as a personal edit (skip_diverged) and stop
-# auto-updating. Restoring both keeps content and manifest consistent.
-META_FILES = ("skill_usage.json", "curator_state.json", "team_sync.json")
-META_RESTORE = ("skill_usage.json", "team_sync.json")  # curator_state: never
+META_FILES = ("skill_usage.json", "curator_state.json")
+META_RESTORE = ("skill_usage.json",)  # curator_state: never
 
 
 def _stamp():
@@ -67,8 +63,7 @@ def make_snapshot(protect=()):
                 return None
             # Symlinks are excluded at CREATION time: rollback (rightly)
             # refuses link members, so a snapshot containing one would be
-            # permanently unrestorable — and the team scanner already treats
-            # symlinks in skill packages as a blocking finding anyway.
+            # permanently unrestorable.
             if ti.issym() or ti.islnk():
                 return None
             return ti
@@ -287,8 +282,8 @@ def rollback(stamp=None):
                 elif new_format:
                     # new-format snapshot records absence explicitly: the file
                     # did not exist at snapshot time, so a faithful restore
-                    # removes the newer one (else e.g. team_sync.json would
-                    # point at hashes the restored tree no longer matches).
+                    # removes the newer one (else it would describe state the
+                    # restored tree no longer matches).
                     # Absent-then AND absent-now is also a faithful restore.
                     if os.path.isfile(live_meta):
                         meta_touched.append(meta_name)

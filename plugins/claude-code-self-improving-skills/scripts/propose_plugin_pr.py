@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """propose_plugin_pr.py — thin adapter for the claude-code-self-improving-skills L2 flow.
 
-The actual git/gh machinery lives in propose_pr.py (shared with /share-skill).
+The actual git/gh machinery lives in propose_pr.py.
 This adapter keeps the original CLI contract used by the
 /propose-plugin-improvement command:
 

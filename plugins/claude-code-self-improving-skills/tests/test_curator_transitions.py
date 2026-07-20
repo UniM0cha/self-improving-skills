@@ -95,14 +95,14 @@ def test_archive_one_rejects_missing_or_self_umbrella(sandbox):
 
 def test_archive_one_refuses_protected_unless_force(sandbox):
     _seed(sandbox, "pinned-skill", 1, pinned=True)
-    _seed(sandbox, "team-skill", 1, created_by="team")
+    _seed(sandbox, "user-skill", 1, created_by="user")
     assert sandbox.curator.archive_one("pinned-skill")["ok"] is False
-    assert sandbox.curator.archive_one("team-skill")["ok"] is False
+    assert sandbox.curator.archive_one("user-skill")["ok"] is False
     assert (sandbox.skills / "pinned-skill").is_dir()
-    assert (sandbox.skills / "team-skill").is_dir()
-    res = sandbox.curator.archive_one("team-skill", force=True)  # human override
+    assert (sandbox.skills / "user-skill").is_dir()
+    res = sandbox.curator.archive_one("user-skill", force=True)  # human override
     assert res["ok"]
-    assert not (sandbox.skills / "team-skill").exists()
+    assert not (sandbox.skills / "user-skill").exists()
 
 
 def test_archive_one_fails_closed_on_unknown_ownership(sandbox):

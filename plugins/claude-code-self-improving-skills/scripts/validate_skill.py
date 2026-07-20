@@ -37,10 +37,6 @@ try:
     import usage_store
 except Exception:
     usage_store = None
-try:
-    import team_manifest
-except Exception:
-    team_manifest = None
 
 BACKUP_DIR = os.path.expanduser("~/.claude/self-improve/skill_backups")
 
@@ -151,43 +147,6 @@ def _validate(text):
     return problems
 
 
-def _team_entry(name):
-    """The team-sync manifest entry for this skill, or None (not team-managed)."""
-    if team_manifest is None or not name:
-        return None
-    try:
-        entry = team_manifest.load().get("skills", {}).get(name)
-        return entry if isinstance(entry, dict) else None
-    except Exception:
-        return None
-
-
-def _diverged_notice(name, file_path, entry):
-    """One-time notice when an edit makes a team-managed skill diverge from its
-    origin hash — sync will stop auto-updating it (personalization wins)."""
-    if entry is None or team_manifest is None:
-        return None
-    try:
-        if entry.get("diverged_notified"):
-            return None
-        origin = entry.get("origin_hash")
-        cur = team_manifest.dir_hash(os.path.dirname(file_path))
-        if not origin or not cur or cur == origin:
-            return None
-
-        def _mark(m):
-            e = m.get("skills", {}).get(name)
-            if isinstance(e, dict):
-                e["diverged_notified"] = True
-        team_manifest.mutate(_mark)
-        return ("[claude-code-self-improving-skills] 팀 관리 스킬 '{0}' 을 로컬에서 수정했습니다. "
-                "이후 /sync-team-skills 는 이 스킬을 자동 업데이트하지 않습니다"
-                "(diverged — 개인화가 항상 우선). 이 개선을 팀에 반영하려면 "
-                "/share-skill {0} 을 사용하세요.".format(name))
-    except Exception:
-        return None
-
-
 def _advisory(text, file_path=None):
     """Non-blocking quality advisories for a VALID skill (never trips rollback)."""
     fm, _body = _split_frontmatter(text)
@@ -205,16 +164,14 @@ def _advisory(text, file_path=None):
         notes.append("`name`에 선행·후행·연속 하이픈이 있습니다({0}). 공식 스킬 규약 위반이니 "
                      "디렉토리명과 함께 단어-사이-하이픈 형태로 바꾸는 것을 권장합니다."
                      .format(name))
-    # name ≠ dir mismatch: usage telemetry keys on the DIR name while the
-    # team-share gate (scan_skill) requires frontmatter name == dir name —
-    # a mismatch silently splits those. Advisory only (never blocking, so a
+    # name ≠ dir mismatch: usage telemetry keys on the DIR name, so a mismatch
+    # silently splits a skill's records. Advisory only (never blocking, so a
     # pre-existing mismatched skill can't fall into an edit→rollback loop).
     dirname = os.path.basename(os.path.dirname(str(file_path or "").replace("\\", "/")))
     if name and dirname and name != dirname:
         notes.append("frontmatter name('{0}')과 디렉토리명('{1}')이 다릅니다. usage 텔레메트리는 "
-                     "디렉토리명으로 집계되고 팀 공유 게이트(scan_skill)는 일치를 요구하므로 "
-                     "어긋납니다 — 디렉토리명 또는 name 을 일치시키는 것을 권장합니다."
-                     .format(name, dirname))
+                     "디렉토리명으로 집계되므로 어긋납니다 — 디렉토리명 또는 name 을 "
+                     "일치시키는 것을 권장합니다.".format(name, dirname))
     if notes:
         return "[claude-code-self-improving-skills] 참고:\n- " + "\n- ".join(notes)
     return None
@@ -293,7 +250,7 @@ def _stamp_provenance(path, text):
         pass
 
 
-def _record_patch(file_path, text, payload, team_entry=None):
+def _record_patch(file_path, text, payload):
     """Record a patch event for this learned-skill write (seeding the usage
     record on first sight).
 
@@ -313,9 +270,7 @@ def _record_patch(file_path, text, payload, team_entry=None):
     if not name:
         return
     agent_type = str(payload.get("agent_type") or "")
-    if team_entry is not None:
-        created_by = "team"  # team-synced skill: owner is the team repo
-    elif "skill-distiller" in agent_type or re.search(r"origin\s*:\s*distilled", text):
+    if "skill-distiller" in agent_type or re.search(r"origin\s*:\s*distilled", text):
         created_by = "agent"
     else:
         created_by = "user"
@@ -355,19 +310,11 @@ def main():
 
     problems = _validate(text)
     if not problems:
-        norm = str(file_path).replace("\\", "/")
-        name = os.path.basename(os.path.dirname(norm))
-        entry = _team_entry(name)
-        if entry is None:
-            # team-managed skills never get the personal-loop provenance stamp:
-            # it would mutate the file (breaking the origin-hash comparison
-            # beyond the user's actual edit) and pollute the learned counter.
-            _stamp_provenance(file_path, text)
-        _record_patch(file_path, text, payload, team_entry=entry)
-        msgs = [m for m in (_diverged_notice(name, file_path, entry),
-                            _advisory(text, file_path)) if m]
-        if msgs:
-            feedback("\n\n".join(msgs))
+        _stamp_provenance(file_path, text)
+        _record_patch(file_path, text, payload)
+        adv = _advisory(text, file_path)
+        if adv:
+            feedback(adv)
         silent()
 
     # 구조가 깨짐 → 편집 직전 백업이 있으면 롤백(트랜잭션 안전), 없으면(신규) 경고만.

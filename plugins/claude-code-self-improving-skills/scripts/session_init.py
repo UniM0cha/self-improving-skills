@@ -173,48 +173,7 @@ def main():
     except Exception:
         pass
 
-    _team_sync_reminder(lines)
-
     emit_context("\n".join(lines))
-
-
-def _team_sync_reminder(lines):
-    """If team skills are synced on this machine and the last sync is old,
-    append a one-line reminder. Reads ONLY the local manifest — a SessionStart
-    hook must never touch the network. Throttled via last_reminded_at."""
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import team_manifest
-        m = team_manifest.load()
-        if not m.get("skills"):
-            return
-
-        def _age_days(iso):
-            try:
-                from datetime import datetime
-                return (time.time() - datetime.fromisoformat(str(iso)).timestamp()) / 86400.0
-            except Exception:
-                return None
-
-        interval = _int_env("SIS_TEAM_SYNC_REMIND_DAYS", 7)
-        # age-check and throttle-stamp under ONE manifest lock, so two
-        # concurrent SessionStarts can't both win the throttle race
-        fired = []
-
-        def _check_and_mark(mm):
-            last_age = _age_days(mm.get("last_sync_at")) if mm.get("last_sync_at") else None
-            rem_age = _age_days(mm.get("last_reminded_at")) if mm.get("last_reminded_at") else None
-            if (last_age is None or last_age >= interval) and (rem_age is None or rem_age >= 1):
-                mm["last_reminded_at"] = team_manifest.now_iso()
-                fired.append(last_age)
-        team_manifest.mutate(_check_and_mark)
-        if fired:
-            lines.append(
-                "[팀 스킬] 마지막 동기화 후 {0}일 경과 — /sync-team-skills 로 "
-                "팀 업데이트를 확인하세요.".format(
-                    "{0}+".format(interval) if fired[0] is None else int(fired[0])))
-    except Exception:
-        pass
 
 
 # NOTE(v0.10.0): the always-on ~470-char permission-recovery hint that used to

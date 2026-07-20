@@ -273,8 +273,8 @@ def archive_one(name, absorbed_into=None, dry_run=False, force=False):
     whole cluster while merging nothing; script-level checks, never trust the
     prompt alone):
       - a declared umbrella must exist on disk and must not be the skill itself
-      - pinned / user-authored / team-synced skills are refused unless a human
-        passes --force (mirrors run()/prune_idle()'s skip rules — this was the
+      - pinned / user-authored skills are refused unless a human passes
+        --force (mirrors run()/prune_idle()'s skip rules — this was the
         one entry point without them)
     """
     src = os.path.join(SKILLS_DIR, name)
@@ -302,7 +302,7 @@ def archive_one(name, absorbed_into=None, dry_run=False, force=False):
         if rec.get("pinned") or _frontmatter_pinned(name):
             return {"name": name, "ok": False,
                     "reason": "pinned — unpin first (/pin-skill 해제) or pass --force"}
-        if created_by in ("team", "user"):
+        if created_by == "user":
             return {"name": name, "ok": False,
                     "reason": "created_by={0} — not curator-eligible; "
                               "pass --force to override".format(created_by)}
@@ -355,7 +355,7 @@ def run(dry_run=False):
     learned = _learned_names()
     summary = {
         "stale": [], "archived": [], "reactivated": [],
-        "skipped_pinned": [], "skipped_user": [], "skipped_team": [],
+        "skipped_pinned": [], "skipped_user": [],
         "stale_days": stale_days, "archive_days": archive_days,
         "dry_run": dry_run, "ran_at": now.replace(microsecond=0).isoformat(),
     }
@@ -370,10 +370,8 @@ def run(dry_run=False):
     for name in sorted(learned):
         rec = records.get(name, {})
         if rec.get("created_by", "agent") != "agent":
-            # team-synced skills have an external upstream owner (the team
-            # repo) and are NEVER curation-eligible — Hermes hub rule.
-            key = "skipped_team" if rec.get("created_by") == "team" else "skipped_user"
-            summary[key].append(name)
+            # only agent-distilled skills are curation-eligible
+            summary["skipped_user"].append(name)
             continue
         if rec.get("pinned") or _frontmatter_pinned(name):
             summary["skipped_pinned"].append(name)
@@ -415,9 +413,8 @@ def _write_report(summary):
             "- thresholds: stale>={0}d, archive>={1}d".format(summary["stale_days"], summary["archive_days"]),
             "- archived: {0} | stale: {1} | reactivated: {2}".format(
                 len(summary["archived"]), len(summary["stale"]), len(summary["reactivated"])),
-            "- skipped (pinned): {0} | skipped (user-authored): {1} | skipped (team): {2}".format(
-                len(summary["skipped_pinned"]), len(summary["skipped_user"]),
-                len(summary.get("skipped_team", []))),
+            "- skipped (pinned): {0} | skipped (user-authored): {1}".format(
+                len(summary["skipped_pinned"]), len(summary["skipped_user"])),
             "",
         ]
         if summary["archived"]:
