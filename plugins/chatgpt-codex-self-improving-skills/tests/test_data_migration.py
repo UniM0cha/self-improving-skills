@@ -73,6 +73,22 @@ def test_dry_run_writes_nothing_even_when_target_does_not_exist(tmp_path):
     assert migration.tree_content_hash(source) == source_hash
 
 
+def test_apply_can_initialize_missing_target_with_operational_locks(tmp_path):
+    migration = _reload()
+    source = tmp_path / "legacy"
+    target = tmp_path / "canonical"
+    source.mkdir()
+    _write_json(source / "usage.json", _usage(skills={"demo": {"use_count": 3}}))
+
+    result = migration.migrate_data(source, apply=True, target=target)
+
+    assert result["applied"] is True
+    assert (target / "usage-lock.sqlite3").is_file()
+    assert (target / "backups-lock.sqlite3").is_file()
+    merged = json.loads((target / "usage.json").read_text(encoding="utf-8"))
+    assert merged["skills"]["demo"]["use_count"] == 3
+
+
 def test_apply_merges_only_skills_and_archives_history(tmp_path):
     migration = _reload()
     source = tmp_path / "legacy-store"
@@ -626,6 +642,25 @@ def test_legacy_import_manifest_is_preserved_inside_payload(tmp_path):
     generated = json.loads((history / "import.json").read_text(encoding="utf-8"))
     assert generated["source_content_hash"] == result["source_content_hash"]
     assert generated["source"] == str(source.resolve())
+
+
+def test_operational_lock_databases_and_journals_are_not_archived(tmp_path):
+    migration = _reload()
+    source = tmp_path / "legacy"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    _write_json(source / "usage.json", _usage())
+    for name in migration.OPERATIONAL_LOCK_NAMES:
+        (source / name).touch(mode=0o600)
+
+    result = migration.migrate_data(source, apply=True, target=target)
+
+    payload = Path(result["history"]["payload_path"])
+    snapshot = Path(result["snapshot"]["source"])
+    for name in migration.OPERATIONAL_LOCK_NAMES:
+        assert not (payload / name).exists()
+        assert not (snapshot / name).exists()
 
 
 def test_backup_manifest_paths_are_not_trusted_and_unsafe_backups_are_skipped(

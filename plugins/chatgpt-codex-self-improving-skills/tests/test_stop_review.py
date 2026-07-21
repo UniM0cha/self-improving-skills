@@ -4,6 +4,9 @@ import subprocess
 import sys
 
 SCRIPTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts"))
+sys.path.insert(0, SCRIPTS_DIR)
+
+import review_queue
 
 
 def test_stop_review_detects_recent_user_transcript_signal(tmp_path):
@@ -13,7 +16,11 @@ def test_stop_review_detects_recent_user_transcript_signal(tmp_path):
         + "\n",
         encoding="utf-8",
     )
-    env = dict(os.environ, PLUGIN_DATA=str(tmp_path / "data"))
+    env = dict(
+        os.environ,
+        PLUGIN_DATA=str(tmp_path / "data"),
+        CODEX_SELF_IMPROVE_TEST_NO_LAUNCH="1",
+    )
     proc = subprocess.run(
         [sys.executable, os.path.join(SCRIPTS_DIR, "stop_review.py")],
         input=json.dumps({"turn_id": "t1", "transcript_path": str(transcript)}),
@@ -47,6 +54,8 @@ def test_stop_review_loop_guard_writes_nothing(tmp_path):
 def _run_stop(tmp_path, payload, extra_env=None):
     env = dict(os.environ, PLUGIN_DATA=str(tmp_path / "data"))
     env.pop("CODEX_SELF_IMPROVE_AUTO", None)
+    env.pop("CODEX_SELF_IMPROVE_MODE", None)
+    env["CODEX_SELF_IMPROVE_TEST_NO_LAUNCH"] = "1"
     env.update(extra_env or {})
     return subprocess.run(
         [sys.executable, os.path.join(SCRIPTS_DIR, "stop_review.py")],
@@ -58,6 +67,11 @@ def _run_stop(tmp_path, payload, extra_env=None):
 def _signals(tmp_path):
     path = tmp_path / "data" / "review-signals.jsonl"
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _jobs(tmp_path):
+    queue = review_queue.ReviewQueue(tmp_path / "data" / "review-jobs.sqlite3")
+    return queue.list_jobs()
 
 
 def test_topic_words_alone_are_not_a_signal(tmp_path):
@@ -96,16 +110,19 @@ def test_interval_trigger_uses_tool_counter_and_resets(tmp_path):
     transcript.write_text(json.dumps({"role": "user", "content": "ok"}) + "\n",
                           encoding="utf-8")
     proc = _run_stop(tmp_path, {"turn_id": "t1", "transcript_path": str(transcript)},
-                     extra_env={"CODEX_SELF_IMPROVE_AUTO": "1"})
-    out = json.loads(proc.stdout.strip())
-    assert out["decision"] == "block"
+                     extra_env={"CODEX_SELF_IMPROVE_MODE": "background"})
+    assert proc.stdout.strip() == ""
+    jobs = _jobs(tmp_path)
+    assert len(jobs) == 1
+    assert jobs[0]["turn_id"] == "t1"
+    assert jobs[0]["trigger"] == "interval"
     usage = json.loads((data / "usage.json").read_text(encoding="utf-8"))
     counters = usage["counters"]["iters_since_review_by_session"]
     assert counters["global"]["v"] == 0  # consumed after firing
     assert "iters_since_review" not in usage["counters"]  # legacy key migrated
 
 
-def test_interval_trigger_auto_continues_when_env_is_unset(tmp_path):
+def test_interval_trigger_queues_in_background_when_env_is_unset(tmp_path):
     data = tmp_path / "data"
     data.mkdir(parents=True)
     (data / "usage.json").write_text(json.dumps({
@@ -113,9 +130,50 @@ def test_interval_trigger_auto_continues_when_env_is_unset(tmp_path):
         "counters": {"iters_since_review": 10},
     }), encoding="utf-8")
 
-    proc = _run_stop(tmp_path, {"turn_id": "default-on"})
+    transcript = tmp_path / "thread.jsonl"
+    transcript.write_text(json.dumps({"role": "user", "content": "ok"}) + "\n")
+    proc = _run_stop(
+        tmp_path, {"turn_id": "default-on", "transcript_path": str(transcript)}
+    )
+    assert proc.stdout.strip() == ""
+    jobs = _jobs(tmp_path)
+    assert len(jobs) == 1
+    assert jobs[0]["turn_id"] == "default-on"
+
+
+def test_missing_transcript_keeps_background_trigger_pending(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir(parents=True)
+    (data / "usage.json").write_text(json.dumps({
+        "version": 1, "skills": {}, "tools": {},
+        "counters": {"iters_since_review": 10},
+    }), encoding="utf-8")
+
+    proc = _run_stop(tmp_path, {"turn_id": "missing-transcript"})
+
+    assert proc.stdout == ""
+    assert not (data / "review-jobs.sqlite3").exists()
+    usage = json.loads((data / "usage.json").read_text(encoding="utf-8"))
+    assert usage["counters"]["iters_since_review_by_session"]["global"]["v"] == 10
+
+
+def test_explicit_foreground_mode_retains_stop_continuation(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir(parents=True)
+    (data / "usage.json").write_text(json.dumps({
+        "version": 1, "skills": {}, "tools": {},
+        "counters": {"iters_since_review": 10},
+    }), encoding="utf-8")
+
+    proc = _run_stop(
+        tmp_path,
+        {"turn_id": "foreground"},
+        extra_env={"CODEX_SELF_IMPROVE_MODE": "foreground"},
+    )
     out = json.loads(proc.stdout.strip())
     assert out["decision"] == "block"
+    assert "$self-improving-skills-review" in out["reason"]
+    assert not (data / "review-jobs.sqlite3").exists()
 
 
 def test_explicit_non_truthy_value_disables_auto_continue(tmp_path):
@@ -132,6 +190,7 @@ def test_explicit_non_truthy_value_disables_auto_continue(tmp_path):
         extra_env={"CODEX_SELF_IMPROVE_AUTO": "off"},
     )
     assert proc.stdout.strip() == ""
+    assert not (data / "review-jobs.sqlite3").exists()
 
 
 def test_below_counter_threshold_does_not_continue(tmp_path):
@@ -142,8 +201,63 @@ def test_below_counter_threshold_does_not_continue(tmp_path):
         "counters": {"iters_since_review": 3},
     }), encoding="utf-8")
     proc = _run_stop(tmp_path, {"turn_id": "t1"},
-                     extra_env={"CODEX_SELF_IMPROVE_AUTO": "1"})
+                     extra_env={"CODEX_SELF_IMPROVE_MODE": "background"})
     assert proc.stdout.strip() == ""  # no block emitted
+    assert not (data / "review-jobs.sqlite3").exists()
+
+
+def test_enqueue_failure_keeps_counter_and_emits_no_stop_output(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir(parents=True)
+    (data / "usage.json").write_text(json.dumps({
+        "version": 1, "skills": {}, "tools": {},
+        "counters": {"iters_since_review": 10},
+    }), encoding="utf-8")
+    # A directory at the SQLite file path makes queue initialization fail
+    # without making the plugin data directory itself unwritable.
+    (data / "review-jobs.sqlite3").mkdir()
+    transcript = tmp_path / "thread.jsonl"
+    transcript.write_text(json.dumps({"role": "user", "content": "ok"}) + "\n")
+
+    proc = _run_stop(
+        tmp_path,
+        {"turn_id": "enqueue-fails", "transcript_path": str(transcript)},
+    )
+
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    usage = json.loads((data / "usage.json").read_text(encoding="utf-8"))
+    counters = usage["counters"]["iters_since_review_by_session"]
+    assert counters["global"]["v"] == 10
+
+
+def test_signal_window_is_consumed_only_after_durable_enqueue(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir(parents=True)
+    transcript = tmp_path / "thread.jsonl"
+    transcript.write_text(
+        json.dumps({"role": "user", "content": "다음부터 이 규칙은 항상 기억해 주세요."})
+        + "\n",
+        encoding="utf-8",
+    )
+    broken_queue_path = data / "review-jobs.sqlite3"
+    broken_queue_path.mkdir()
+
+    first = _run_stop(
+        tmp_path,
+        {"turn_id": "first", "transcript_path": str(transcript)},
+    )
+    assert first.stdout == ""
+    assert _signals(tmp_path)[-1]["signal"] is True
+
+    broken_queue_path.rmdir()
+    second = _run_stop(
+        tmp_path,
+        {"turn_id": "second", "transcript_path": str(transcript)},
+    )
+    assert second.stdout == ""
+    assert _signals(tmp_path)[-1]["signal"] is True
+    assert _jobs(tmp_path)[0]["turn_id"] == "second"
 
 
 def test_payload_signal_also_consumes_transcript_window(tmp_path):

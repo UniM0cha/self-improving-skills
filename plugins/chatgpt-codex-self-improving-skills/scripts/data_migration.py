@@ -24,15 +24,22 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 import skill_store
 from skill_store import SkillStoreError
 
-try:
-    import fcntl
-except Exception:  # pragma: no cover - Windows fallback
-    fcntl = None
-
 
 COUNT_FIELDS = ("use_count", "view_count", "patch_count")
 TARGET_MANAGED_FIELDS = {"last_managed_at", "managed_sig"}
-HISTORICAL_EXCLUDES = {"backups", "usage.lock", "backups.lock"}
+OPERATIONAL_LOCK_NAMES = {
+    "usage.lock",
+    "backups.lock",
+    "usage-lock.sqlite3",
+    "usage-lock.sqlite3-journal",
+    "usage-lock.sqlite3-wal",
+    "usage-lock.sqlite3-shm",
+    "backups-lock.sqlite3",
+    "backups-lock.sqlite3-journal",
+    "backups-lock.sqlite3-wal",
+    "backups-lock.sqlite3-shm",
+}
+HISTORICAL_EXCLUDES = {"backups", *OPERATIONAL_LOCK_NAMES}
 IMPORT_MANIFEST = "import.json"
 HASH_CHUNK_SIZE = 1024 * 1024
 SAFE_BACKUP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$")
@@ -216,6 +223,8 @@ def tree_content_hash(
 
         for name in sorted(filenames):
             path = current / name
+            if current == root and name in OPERATIONAL_LOCK_NAMES:
+                continue
             resolved = path.resolve()
             if any(resolved == item or _path_is_within(resolved, item) for item in excluded):
                 continue
@@ -624,8 +633,18 @@ def _snapshot(
     staging = backup_root / f".{destination.name}.staging"
     try:
         staging.mkdir()
-        _copy_complete_tree(source, staging / "source", excluded=(backup_root,))
-        _copy_complete_tree(target, staging / "target", excluded=(backup_root,))
+        source_operational = tuple(source / name for name in OPERATIONAL_LOCK_NAMES)
+        target_operational = tuple(target / name for name in OPERATIONAL_LOCK_NAMES)
+        _copy_complete_tree(
+            source,
+            staging / "source",
+            excluded=(backup_root, *source_operational),
+        )
+        _copy_complete_tree(
+            target,
+            staging / "target",
+            excluded=(backup_root, *target_operational),
+        )
         skill_store.atomic_write_json(staging / "snapshot.json", {
             "version": 1,
             "created_at": skill_store.now_iso(),
@@ -651,37 +670,15 @@ def _snapshot(
 
 @contextmanager
 def _file_lock(path: Path) -> Iterator[None]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_symlink():
-        raise SkillStoreError(f"Refusing symlinked lock file: {path}")
-    with path.open("a", encoding="utf-8") as handle:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    with skill_store.legacy_file_lock(path, create=True):
+        yield
 
 
 @contextmanager
 def _existing_file_lock(path: Path) -> Iterator[None]:
     """Share a legacy store's lock without creating or writing the source."""
-    if path.is_symlink():
-        raise SkillStoreError(f"Refusing symlinked source lock file: {path}")
-    if not path.exists():
+    with skill_store.legacy_file_lock(path, create=False):
         yield
-        return
-    if not path.is_file():
-        raise SkillStoreError(f"Source lock path is not a file: {path}")
-    with path.open("rb") as handle:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _archive_matches(destination: Path, source_hash: str) -> bool:
@@ -995,6 +992,14 @@ def migrate_data(
             for lock_path, create in lock_specs:
                 context = _file_lock(lock_path) if create else _existing_file_lock(lock_path)
                 locks.enter_context(context)
+                kind = lock_path.name.removesuffix(".lock")
+                locks.enter_context(
+                    skill_store.sqlite_transaction_lock(
+                        lock_path.parent,
+                        kind,
+                        create=create,
+                    )
+                )
 
             # Nothing may drift between the exact pre-apply snapshot and the
             # locked write phase. A lock created by this migration is the only
@@ -1017,7 +1022,7 @@ def migrate_data(
             else:
                 unexpected = [
                     entry for entry in target_path.iterdir()
-                    if entry not in target_locks
+                    if entry.name not in OPERATIONAL_LOCK_NAMES
                 ]
                 if unexpected:
                     raise SkillStoreError(

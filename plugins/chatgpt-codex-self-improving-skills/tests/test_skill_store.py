@@ -1,7 +1,15 @@
 import datetime
 import importlib
+import json
 import os
+import sqlite3
+import stat
+import subprocess
 import sys
+import time
+from pathlib import Path
+
+import pytest
 
 SCRIPTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts"))
 sys.path.insert(0, SCRIPTS_DIR)
@@ -28,6 +36,7 @@ def _store(tmp_path, monkeypatch, *roots):
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path / "data"))
     monkeypatch.setenv("CODEX_SELF_IMPROVE_SKILL_ROOTS", os.pathsep.join(str(r) for r in roots))
     monkeypatch.setenv("CODEX_SELF_IMPROVE_CREATE_ROOT", str(roots[0]))
+    monkeypatch.delenv("CODEX_SELF_IMPROVE_WRITE_ROOTS", raising=False)
     import skill_store
 
     return importlib.reload(skill_store)
@@ -83,22 +92,95 @@ def test_source_checkout_keeps_legacy_home_fallback(tmp_path, monkeypatch):
     assert not path.exists()
 
 
-def test_auto_continue_defaults_on_and_allows_explicit_opt_out(tmp_path, monkeypatch):
+def test_user_home_skips_relative_home_for_absolute_userprofile(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", "relative-home")
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    import skill_store
+
+    store = importlib.reload(skill_store)
+    assert store.user_home() == tmp_path.resolve()
+
+
+def test_user_home_never_resolves_relative_path_against_cwd(monkeypatch):
+    monkeypatch.setenv("HOME", "relative-home")
+    monkeypatch.setenv("USERPROFILE", "relative-profile")
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: Path("relative-path-home")))
+    import skill_store
+
+    store = importlib.reload(skill_store)
+    try:
+        resolved = store.user_home()
+    except store.SkillStoreError:
+        return
+    assert resolved.is_absolute()
+    assert resolved != (Path.cwd() / "relative-path-home").resolve()
+
+
+def test_review_mode_defaults_background_and_mode_wins(tmp_path, monkeypatch):
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path / "data"))
+    monkeypatch.delenv("CODEX_SELF_IMPROVE_MODE", raising=False)
     monkeypatch.delenv("CODEX_SELF_IMPROVE_AUTO", raising=False)
     import skill_store
 
     store = importlib.reload(skill_store)
+    assert store.resolve_review_mode() == ("background", False)
+    assert store.auto_continue_enabled() is False
+
+    monkeypatch.setenv("CODEX_SELF_IMPROVE_MODE", "foreground")
+    monkeypatch.setenv("CODEX_SELF_IMPROVE_AUTO", "0")
+    assert store.resolve_review_mode() == ("foreground", False)
     assert store.auto_continue_enabled() is True
+    status = store.status()
+    assert status["review_mode"] == "foreground"
+    assert status["automatic_review"] is True
+    assert status["auto_continue"] is True
+    assert status["mode_invalid"] is False
+
+    monkeypatch.setenv("CODEX_SELF_IMPROVE_MODE", "unexpected")
+    monkeypatch.setenv("CODEX_SELF_IMPROVE_AUTO", "1")
+    status = store.status()
+    assert status["review_mode"] == "off"
+    assert status["automatic_review"] is False
+    assert status["auto_continue"] is False
+    assert status["mode_invalid"] is True
+
+
+def test_legacy_auto_maps_to_background_or_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("PLUGIN_DATA", str(tmp_path / "data"))
+    monkeypatch.delenv("CODEX_SELF_IMPROVE_MODE", raising=False)
+    import skill_store
+
+    store = importlib.reload(skill_store)
     for value in ("1", "true", "TRUE", "yes", "on"):
         monkeypatch.setenv("CODEX_SELF_IMPROVE_AUTO", value)
-        assert store.auto_continue_enabled() is True
+        assert store.resolve_review_mode() == ("background", False)
+        assert store.auto_continue_enabled() is False
     for value in ("0", "false", "no", "off", "", "unexpected"):
         monkeypatch.setenv("CODEX_SELF_IMPROVE_AUTO", value)
+        assert store.resolve_review_mode() == ("off", False)
         assert store.auto_continue_enabled() is False
     status = store.status()
     assert status["auto_continue"] is False
     assert status["data_dir_source"] == "plugin_data_env"
+
+
+def test_status_does_not_report_reused_worker_pid_as_active(tmp_path, monkeypatch):
+    roots = [tmp_path / "skills"]
+    roots[0].mkdir()
+    store = _store(tmp_path, monkeypatch, *roots)
+    import review_queue
+
+    identities = {12345: "original"}
+    monkeypatch.setattr(review_queue, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(review_queue, "_pid_identity", lambda pid: identities.get(int(pid)))
+    queue = review_queue.ReviewQueue()
+    assert queue.acquire_worker_lease("old-worker", pid=12345) is True
+    identities[12345] = "reused-by-another-process"
+
+    worker = store.status()["worker"]
+
+    assert worker["active"] is False
+    assert worker["state"] == "stale"
 
 
 def test_default_create_root_is_codex_skills(tmp_path, monkeypatch):
@@ -115,6 +197,90 @@ def test_default_create_root_is_codex_skills(tmp_path, monkeypatch):
     expected = tmp_path / ".codex" / "skills" / "codex-born"
     assert result["path"] == str(expected.resolve())
     assert (expected / "SKILL.md").is_file()
+
+
+def test_write_roots_keep_repo_skills_readable_but_immutable(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo-skills"
+    user_root = tmp_path / "user-skills"
+    repo_skill = _skill(repo_root, "repo-owned")
+    _skill(user_root, "user-owned")
+    store = _store(tmp_path, monkeypatch, repo_root, user_root)
+    monkeypatch.setenv("CODEX_SELF_IMPROVE_WRITE_ROOTS", str(user_root))
+
+    assert {row["name"] for row in store.list_skills()["skills"]} == {
+        "repo-owned", "user-owned"
+    }
+    assert store.view_skill("repo-owned")["name"] == "repo-owned"
+
+    with pytest.raises(store.SkillStoreError, match="outside configured write roots"):
+        store.patch_skill("repo-owned", "body", "changed")
+    with pytest.raises(store.SkillStoreError, match="outside configured write roots"):
+        store.write_support_file("repo-owned", "references/note.md", "changed")
+    with pytest.raises(store.SkillStoreError, match="outside configured write roots"):
+        store.pin_skill("repo-owned")
+    with pytest.raises(store.SkillStoreError, match="outside configured write roots"):
+        store.archive_skill("repo-owned")
+
+    assert "body\n" in (repo_skill / "SKILL.md").read_text(encoding="utf-8")
+    assert store.patch_skill("user-owned", "body", "changed")["action"] == "patch"
+
+
+def test_write_roots_limit_create_and_block_symlink_escape(tmp_path, monkeypatch):
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    store = _store(tmp_path, monkeypatch, allowed)
+    monkeypatch.setenv("CODEX_SELF_IMPROVE_WRITE_ROOTS", str(allowed))
+    content = "---\nname: safe\ndescription: d\n---\nbody\n"
+
+    assert store.create_skill("safe", content)["action"] == "create"
+    blocked_content = "---\nname: blocked\ndescription: d\n---\nbody\n"
+    with pytest.raises(store.SkillStoreError, match="outside configured write roots"):
+        store.create_skill("blocked", blocked_content, root=str(outside))
+
+    missing_outside = tmp_path / "missing-outside"
+    monkeypatch.setenv("CODEX_SELF_IMPROVE_CREATE_ROOT", str(missing_outside))
+    with pytest.raises(store.SkillStoreError, match="outside configured write roots"):
+        store.create_skill("blocked", blocked_content)
+    assert not missing_outside.exists()
+
+    escaped_root = allowed / "escaped-root"
+    os.symlink(str(outside), str(escaped_root))
+    escaped_content = "---\nname: escaped\ndescription: d\n---\nbody\n"
+    with pytest.raises(store.SkillStoreError, match="outside configured write roots"):
+        store.create_skill("escaped", escaped_content, root=str(escaped_root))
+    assert not (outside / "escaped").exists()
+
+
+def test_write_roots_limit_restore_and_rollback_targets(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo-skills"
+    user_root = tmp_path / "user-skills"
+    repo_skill = _skill(repo_root, "repo-backup")
+    _skill(repo_root / ".archive", "repo-archived")
+    _skill(user_root, "user-restorable")
+    store = _store(tmp_path, monkeypatch, repo_root, user_root)
+    backup_id = store.backup_skill(repo_skill, reason="test")["backup_id"]
+    monkeypatch.setenv("CODEX_SELF_IMPROVE_WRITE_ROOTS", str(user_root))
+
+    with pytest.raises(store.SkillStoreError, match="outside configured write roots"):
+        store.restore_skill("repo-archived", root=str(repo_root))
+    with pytest.raises(store.SkillStoreError, match="outside configured write roots"):
+        store.restore_backup(backup_id)
+
+    store.archive_skill("user-restorable")
+    assert store.restore_skill("user-restorable")["action"] == "restore"
+
+
+def test_empty_write_roots_disable_mutations(tmp_path, monkeypatch):
+    root = tmp_path / "skills"
+    _skill(root, "read-only")
+    store = _store(tmp_path, monkeypatch, root)
+    monkeypatch.setenv("CODEX_SELF_IMPROVE_WRITE_ROOTS", "")
+
+    assert store.view_skill("read-only")["name"] == "read-only"
+    with pytest.raises(store.SkillStoreError, match=r"write roots: \(none\)"):
+        store.pin_skill("read-only")
 
 
 def test_curate_protects_untracked_user_skills_and_skips_system_root(tmp_path, monkeypatch):
@@ -418,6 +584,154 @@ def test_consume_review_counter_is_atomic_read_and_zero(tmp_path, monkeypatch):
         store.bump_review_counter()
     assert store.consume_review_counter() == 4
     assert store.get_review_counter() == 0
+
+
+def _process_env(plugin_data):
+    env = os.environ.copy()
+    env["PLUGIN_DATA"] = str(plugin_data)
+    env["PYTHONPATH"] = SCRIPTS_DIR + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def test_transaction_locks_are_private_nonsymlink_and_nestable(tmp_path, monkeypatch):
+    root = tmp_path / "skills"
+    store = _store(tmp_path, monkeypatch, root)
+    with store.usage_lock():
+        usage_db = tmp_path / "data" / "usage-lock.sqlite3"
+        journal = tmp_path / "data" / "usage-lock.sqlite3-journal"
+        assert usage_db.is_file()
+        assert journal.is_file()
+        with store.backups_lock():
+            assert (tmp_path / "data" / "backups-lock.sqlite3").is_file()
+        if os.name != "nt":
+            assert stat.S_IMODE(usage_db.stat().st_mode) == 0o600
+            assert stat.S_IMODE(journal.stat().st_mode) == 0o600
+
+    bad_data = tmp_path / "bad-data"
+    bad_data.mkdir()
+    target = tmp_path / "outside-lock"
+    target.touch()
+    try:
+        (bad_data / "usage-lock.sqlite3").symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this platform")
+    monkeypatch.setenv("PLUGIN_DATA", str(bad_data))
+    with pytest.raises(store.SkillStoreError, match="symlinked SQLite lock"):
+        with store.usage_lock():
+            pass
+
+
+def test_transaction_lock_does_not_relabel_sqlite_error_from_caller(tmp_path, monkeypatch):
+    root = tmp_path / "skills"
+    root.mkdir()
+    store = _store(tmp_path, monkeypatch, root)
+
+    with pytest.raises(sqlite3.OperationalError, match="caller body failure"):
+        with store.usage_lock():
+            raise sqlite3.OperationalError("caller body failure")
+
+
+def test_noncreating_lock_probe_does_not_create_parent(tmp_path, monkeypatch):
+    root = tmp_path / "skills"
+    root.mkdir()
+    store = _store(tmp_path, monkeypatch, root)
+    missing_root = tmp_path / "missing-store"
+
+    with store.legacy_file_lock(missing_root / "usage.lock", create=False):
+        pass
+    with store.sqlite_transaction_lock(missing_root, "usage", create=False):
+        pass
+
+    assert not missing_root.exists()
+
+
+def test_multiprocess_usage_counter_has_no_lost_updates(tmp_path):
+    plugin_data = tmp_path / "data"
+    env = _process_env(plugin_data)
+    code = "import skill_store\nfor _ in range(40): skill_store.bump_review_counter('shared')"
+    children = [
+        subprocess.Popen([sys.executable, "-c", code], env=env)
+        for _ in range(4)
+    ]
+    for child in children:
+        assert child.wait(timeout=20) == 0
+
+    check = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import skill_store; print(skill_store.get_review_counter('shared'))",
+        ],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert check.stdout.strip() == "160"
+
+
+def test_multiprocess_backup_ids_and_manifests_are_not_lost(tmp_path):
+    plugin_data = tmp_path / "data"
+    skill_root = tmp_path / "skills"
+    skill = _skill(skill_root, "shared")
+    env = _process_env(plugin_data)
+    code = (
+        "import pathlib, skill_store, sys; "
+        "skill_store.backup_skill(pathlib.Path(sys.argv[1]), reason='parallel')"
+    )
+    children = [
+        subprocess.Popen([sys.executable, "-c", code, str(skill)], env=env)
+        for _ in range(8)
+    ]
+    for child in children:
+        assert child.wait(timeout=20) == 0
+
+    backups = sorted((plugin_data / "backups").iterdir())
+    assert len(backups) == 8
+    assert len({entry.name for entry in backups}) == 8
+    for entry in backups:
+        manifest = json.loads(
+            (entry / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["backup_id"] == entry.name
+        assert manifest["skill"] == "shared"
+        assert manifest["reason"] == "parallel"
+
+
+def test_transaction_lock_is_reacquired_after_holder_is_terminated(tmp_path):
+    plugin_data = tmp_path / "data"
+    marker = tmp_path / "held"
+    acquired = tmp_path / "acquired"
+    env = _process_env(plugin_data)
+    holder_code = (
+        "import pathlib, skill_store, sys, time\n"
+        "with skill_store.usage_lock():\n"
+        " pathlib.Path(sys.argv[1]).write_text('held', encoding='utf-8')\n"
+        " time.sleep(120)\n"
+    )
+    holder = subprocess.Popen([sys.executable, "-c", holder_code, str(marker)], env=env)
+    deadline = time.monotonic() + 10
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert marker.exists(), "child did not acquire the transaction lock"
+    holder.kill()
+    holder.wait(timeout=10)
+
+    recovery_code = (
+        "import pathlib, skill_store, sys\n"
+        "with skill_store.usage_lock():\n"
+        " pathlib.Path(sys.argv[1]).write_text('ok', encoding='utf-8')\n"
+    )
+    recovered = subprocess.run(
+        [sys.executable, "-c", recovery_code, str(acquired)],
+        env=env,
+        timeout=10,
+        check=False,
+    )
+    assert recovered.returncode == 0
+    assert acquired.read_text(encoding="utf-8") == "ok"
 
 
 def test_restore_backup_targets_original_root_only(tmp_path, monkeypatch):

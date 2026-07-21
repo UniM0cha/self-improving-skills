@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Codex Stop hook: detect self-improvement signals and request review.
+"""Codex Stop hook: detect self-improvement signals and queue review work.
 
 Trigger design (Hermes codex_runtime port):
   * The interval trigger counts accumulated TOOL ITERATIONS (bumped by the
@@ -229,6 +229,7 @@ def main() -> int:
 
     signal, signal_source = _signal_source(last_user, last_assistant,
                                            rows, tail_start, signal_seen)
+    review_mode, mode_invalid = skill_store.resolve_review_mode()
     try:
         iters = skill_store.get_review_counter(session=session)
     except Exception:
@@ -240,12 +241,6 @@ def main() -> int:
         if transcript_path:
             tstate = state.setdefault("transcripts", {})
             entry = dict(tstate.get(transcript_path) or {})
-            if signal:
-                # Consume on ANY signal source: a payload-sourced signal
-                # (last_user/last_assistant) is also present in the transcript
-                # rows, so leaving the offset behind would re-fire the SAME
-                # message as transcript_user_messages on the next Stop.
-                entry["signal_rows_seen"] = total_rows
             entry["rows_seen"] = total_rows
             entry["t"] = now_iso()
             tstate[transcript_path] = entry
@@ -265,16 +260,95 @@ def main() -> int:
         "signal": signal,
         "signal_source": signal_source,
         "transcript_path": transcript_path,
+        "review_mode": review_mode,
+        "mode_invalid": mode_invalid,
     }
     record_review_signal(record)
 
-    if not skill_store.auto_continue_enabled():
+    def _consume_signal_window() -> None:
+        if not signal or not transcript_path:
+            return
+
+        def _consume(st: Dict[str, Any]) -> None:
+            transcripts = st.setdefault("transcripts", {})
+            entry = dict(transcripts.get(transcript_path) or {})
+            entry["signal_rows_seen"] = max(
+                int(entry.get("signal_rows_seen") or 0), total_rows
+            )
+            entry["t"] = now_iso()
+            transcripts[transcript_path] = entry
+            _prune_transcripts(transcripts)
+
+        skill_store.mutate_state(_consume)
+
+    if review_mode == "off":
+        # Disabled review should not repeatedly rediscover the same old
+        # correction if the user later keeps working in this transcript.
+        try:
+            _consume_signal_window()
+        except Exception:
+            pass
         return 0
 
     should_continue = signal or (interval > 0 and iters >= interval)
     if not should_continue:
         return 0
 
+    if review_mode == "background":
+        # The durable queue, not a Stop continuation, owns the automatic
+        # review.  Never print model-visible output from this branch: the
+        # source task's final answer must remain the task's final answer.
+        # Without a captured transcript coordinate there is no safe evidence
+        # for a detached reviewer. Preserve the trigger/counter so a later Stop
+        # with a usable transcript can enqueue it instead of creating a job
+        # that is guaranteed to block.
+        if not transcript_path or total_rows <= 0:
+            return 0
+        try:
+            import review_queue
+            from background_review_worker import launch_detached
+
+            queue = review_queue.ReviewQueue()
+            if signal and interval > 0 and iters >= interval:
+                trigger = "signal+interval"
+            elif signal:
+                trigger = "signal"
+            else:
+                trigger = "interval"
+            queued = queue.enqueue(
+                session_id=session,
+                turn_id=turn_id,
+                transcript_path=transcript_path,
+                transcript_rows=total_rows,
+                signal=signal,
+                signal_source=signal_source,
+                trigger=trigger,
+                model=str(payload.get("model") or ""),
+            )
+            # A newly inserted, coalesced, or exact-duplicate job is durable.
+            # Consume only after that durability boundary so enqueue failures
+            # remain eligible for a later Stop retry.
+            if queued.get("job_id"):
+                try:
+                    skill_store.consume_review_counter(session=session)
+                except Exception:
+                    pass
+                try:
+                    _consume_signal_window()
+                except Exception:
+                    pass
+                try:
+                    launch_detached()
+                except Exception:
+                    pass
+        except Exception:
+            # Fail open for the user's response and fail closed for accounting:
+            # no output, no counter reset, no foreground fallback.
+            pass
+        return 0
+
+    # Explicit compatibility mode only. This is the former visible same-turn
+    # continuation and remains available as CODEX_SELF_IMPROVE_MODE=foreground.
     def _claim(state: Dict[str, Any]) -> bool:
         if state.get("last_auto_turn_id") == turn_id:
             return False  # another hook instance already fired for this turn
@@ -291,6 +365,10 @@ def main() -> int:
             return 0
     except Exception:
         return 0
+    try:
+        _consume_signal_window()
+    except Exception:
+        pass
     try:
         # atomic read-and-zero: a plain reset would erase increments that
         # landed between our earlier read and now (parallel PostToolUse)

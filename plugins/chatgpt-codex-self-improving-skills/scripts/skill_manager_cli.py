@@ -37,6 +37,42 @@ from skill_store import (
 )
 
 CLI_VIEW_WINDOW_MINUTES = 30
+REVIEW_JOB_FIELDS = (
+    "id",
+    "session_id",
+    "turn_id",
+    "signal",
+    "signal_source",
+    "trigger",
+    "model",
+    "status",
+    "attempts",
+    "available_at",
+    "created_at",
+    "updated_at",
+    "started_at",
+    "completed_at",
+    "error_code",
+    "retry_delay_seconds",
+)
+
+
+def _sanitize_review_job(job: dict) -> dict:
+    """Hide transcript/diagnostics while exposing reviewable candidate output."""
+    sanitized = {field: job.get(field) for field in REVIEW_JOB_FIELDS}
+    result = job.get("result")
+    if isinstance(result, dict):
+        sanitized["result_status"] = result.get("status")
+        if result.get("status") == "candidate":
+            # Candidate patches are the intended user-review surface for a
+            # repo skill the background worker was not allowed to mutate.
+            sanitized["candidate_result"] = {
+                "candidates": list(result.get("candidates") or []),
+                "summary": str(result.get("summary") or ""),
+            }
+        elif result.get("status") == "changed":
+            sanitized["skills"] = list(result.get("skills") or [])
+    return sanitized
 
 
 def _require_recent_view(name: str, file_path: str) -> None:
@@ -65,6 +101,24 @@ def main() -> int:
     sub.add_parser("status")
     sub.add_parser("list")
     sub.add_parser("usage")
+
+    review_jobs = sub.add_parser("review-jobs", help="list queued background reviews")
+    review_jobs.add_argument(
+        "--status",
+        choices=("pending", "running", "done", "failed", "blocked"),
+    )
+    review_jobs.add_argument("--limit", type=int, default=100)
+
+    review_retry = sub.add_parser("review-retry", help="retry one failed/blocked review")
+    review_retry.add_argument("job_id", type=int)
+
+    review_worker = sub.add_parser("review-worker", help="run the review worker explicitly")
+    review_worker.add_argument(
+        "--once",
+        action="store_true",
+        required=True,
+        help="process at most one ready review job",
+    )
 
     view = sub.add_parser("view")
     view.add_argument("name")
@@ -148,6 +202,37 @@ def main() -> int:
             result = list_skills()
         elif args.cmd == "usage":
             result = load_usage()
+        elif args.cmd == "review-jobs":
+            try:
+                from review_queue import ReviewQueue
+
+                jobs = ReviewQueue().list_jobs(status=args.status, limit=args.limit)
+            except (ImportError, OSError, ValueError) as exc:
+                raise SkillStoreError(f"Could not read the background review queue: {exc}") from exc
+            result = {
+                "jobs": [_sanitize_review_job(job) for job in jobs],
+                "count": len(jobs),
+            }
+        elif args.cmd == "review-retry":
+            try:
+                from review_queue import ReviewQueue
+
+                retried = ReviewQueue().retry(args.job_id)
+            except (ImportError, OSError, ValueError) as exc:
+                raise SkillStoreError(f"Could not update the background review queue: {exc}") from exc
+            if not retried:
+                raise SkillStoreError(
+                    f"Review job {args.job_id} was not found or is not failed/blocked."
+                )
+            result = {"job_id": args.job_id, "retried": True}
+        elif args.cmd == "review-worker":
+            try:
+                from background_review_worker import run_worker
+                from review_queue import ReviewQueue
+
+                result = run_worker(ReviewQueue(), once=True)
+            except (ImportError, OSError, ValueError) as exc:
+                raise SkillStoreError(f"Could not run the background review worker: {exc}") from exc
         elif args.cmd == "view":
             result = view_skill(args.name, file_path=args.file)
         elif args.cmd == "create":

@@ -1,7 +1,7 @@
 {
   "name": "chatgpt-codex-self-improving-skills",
-  "version": "0.4.0",
-  "description": "Hermes-inspired self-improvement loop for Codex skills, with turn hooks, skill telemetry, backups, and curator tooling.",
+  "version": "0.5.4",
+  "description": "Hermes-inspired self-improvement loop for Codex skills, with non-blocking background reviews, telemetry, backups, and curator tooling.",
   "author": {
     "name": "Samton"
   },
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Codex Self Improvement",
     "shortDescription": "Review turns and maintain Codex skills safely",
-    "longDescription": "Codex Self Improvement packages a Hermes-inspired learning loop: lifecycle hooks record tool usage and trigger threshold-based review by default, skills guide safe skill updates, and a local skill manager keeps backups, provenance, pins, archives, and curator reports.",
+    "longDescription": "Codex Self Improvement packages a Hermes-inspired learning loop: lifecycle hooks record tool usage and queue non-blocking background reviews by default, skills guide safe skill updates, and a local skill manager keeps backups, provenance, pins, archives, and curator reports.",
     "developerName": "Samton",
     "category": "Engineering",
     "capabilities": [

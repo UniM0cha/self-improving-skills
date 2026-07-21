@@ -4,9 +4,10 @@
 Read-before-write guard (Hermes skill_manager 20871c1d): patching or
 overwriting an EXISTING file requires that this server session viewed exactly
 that file first (codex_skill_view registers the resolved path). Creating a
-new file is exempt. Unlike Hermes there is no background-review origin to
-scope the guard to — the Stop hook continues the same session — so the guard
-applies to the whole MCP session unconditionally (documented in README).
+new file is exempt. Only the explicit foreground compatibility mode continues
+the original turn and therefore shares that turn's MCP session. Background
+reviews start an isolated MCP session and must independently view every file
+before writing it; the guard remains session-wide in either process.
 """
 
 from __future__ import annotations
@@ -38,6 +39,40 @@ from skill_store import (
 
 # Resolved file paths this MCP session has actually read via codex_skill_view.
 VIEWED_PATHS: set[str] = set()
+REVIEW_JOB_FIELDS = (
+    "id",
+    "session_id",
+    "turn_id",
+    "signal",
+    "signal_source",
+    "trigger",
+    "model",
+    "status",
+    "attempts",
+    "available_at",
+    "created_at",
+    "updated_at",
+    "started_at",
+    "completed_at",
+    "error_code",
+    "retry_delay_seconds",
+)
+
+
+def _sanitize_review_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Hide transcript/diagnostics while exposing reviewable candidate output."""
+    sanitized = {field: job.get(field) for field in REVIEW_JOB_FIELDS}
+    result = job.get("result")
+    if isinstance(result, dict):
+        sanitized["result_status"] = result.get("status")
+        if result.get("status") == "candidate":
+            sanitized["candidate_result"] = {
+                "candidates": list(result.get("candidates") or []),
+                "summary": str(result.get("summary") or ""),
+            }
+        elif result.get("status") == "changed":
+            sanitized["skills"] = list(result.get("skills") or [])
+    return sanitized
 
 
 def _plugin_version() -> str:
@@ -84,7 +119,27 @@ def _schema(properties: Dict[str, Any], required: list[str] | None = None) -> Di
 
 TOOLS: Dict[str, Dict[str, Any]] = {
     "codex_self_improvement_status": {
-        "description": "Show plugin status, data directory, skill roots, and telemetry counts.",
+        "description": "Show plugin status, review mode, sanitized queue counts, worker state, data directory, skill roots, and telemetry counts.",
+        "inputSchema": _schema({}),
+    },
+    "codex_review_jobs": {
+        "description": "List sanitized background-review job metadata and any structured repo-skill candidate patches. Transcript paths/contents and diagnostic text are never returned.",
+        "inputSchema": _schema(
+            {
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "running", "done", "failed", "blocked"],
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100},
+            }
+        ),
+    },
+    "codex_review_retry": {
+        "description": "Retry one failed or blocked background-review job.",
+        "inputSchema": _schema({"job_id": {"type": "integer"}}, ["job_id"]),
+    },
+    "codex_review_run_worker": {
+        "description": "Run the background-review worker once, processing at most one ready job.",
         "inputSchema": _schema({}),
     },
     "codex_skill_list": {
@@ -197,6 +252,41 @@ def call_tool(name: str, args: Dict[str, Any]) -> Any:
     args = args or {}
     if name == "codex_self_improvement_status":
         return status()
+    if name == "codex_review_jobs":
+        try:
+            from review_queue import ReviewQueue
+
+            jobs = ReviewQueue().list_jobs(
+                status=args.get("status"),
+                limit=int(args.get("limit", 100)),
+            )
+        except (ImportError, OSError, ValueError) as exc:
+            raise SkillStoreError(f"Could not read the background review queue: {exc}") from exc
+        return {
+            "jobs": [_sanitize_review_job(job) for job in jobs],
+            "count": len(jobs),
+        }
+    if name == "codex_review_retry":
+        try:
+            from review_queue import ReviewQueue
+
+            job_id = int(args["job_id"])
+            retried = ReviewQueue().retry(job_id)
+        except (ImportError, OSError, KeyError, TypeError, ValueError) as exc:
+            raise SkillStoreError(f"Could not update the background review queue: {exc}") from exc
+        if not retried:
+            raise SkillStoreError(
+                f"Review job {job_id} was not found or is not failed/blocked."
+            )
+        return {"job_id": job_id, "retried": True}
+    if name == "codex_review_run_worker":
+        try:
+            from background_review_worker import run_worker
+            from review_queue import ReviewQueue
+
+            return run_worker(ReviewQueue(), once=True)
+        except (ImportError, OSError, ValueError) as exc:
+            raise SkillStoreError(f"Could not run the background review worker: {exc}") from exc
     if name == "codex_skill_list":
         return list_skills()
     if name == "codex_skill_view":
@@ -345,4 +435,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

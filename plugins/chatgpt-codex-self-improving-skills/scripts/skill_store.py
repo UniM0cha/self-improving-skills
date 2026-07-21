@@ -8,7 +8,10 @@ import json
 import os
 import re
 import shutil
+import sqlite3
+import stat
 import tempfile
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +21,11 @@ try:
     import fcntl
 except Exception:  # pragma: no cover - Windows fallback
     fcntl = None
+
+try:
+    import msvcrt
+except Exception:  # pragma: no cover - POSIX
+    msvcrt = None
 
 VALID_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 ALLOWED_SUPPORT_DIRS = {"references", "templates", "scripts", "assets"}
@@ -36,6 +44,39 @@ class SkillStoreError(RuntimeError):
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def user_home() -> Path:
+    """Honor hook-provided homes consistently on POSIX and Windows."""
+    for name in ("HOME", "USERPROFILE"):
+        configured = os.environ.get(name)
+        if not configured:
+            continue
+        candidate = Path(configured)
+        if candidate.is_absolute():
+            return candidate.resolve()
+    try:
+        candidate = Path.home()
+        if candidate.is_absolute():
+            return candidate.resolve()
+    except (OSError, RuntimeError):
+        pass
+    if os.name != "nt":
+        try:
+            import pwd
+
+            candidate = Path(pwd.getpwuid(os.getuid()).pw_dir)
+            if candidate.is_absolute():
+                return candidate.resolve()
+        except (ImportError, KeyError, OSError, RuntimeError):
+            pass
+    else:
+        drive = os.environ.get("HOMEDRIVE") or ""
+        tail = os.environ.get("HOMEPATH") or ""
+        candidate = Path(f"{drive}{tail}")
+        if candidate.is_absolute():
+            return candidate.resolve()
+    raise SkillStoreError("No absolute user home directory is available.")
 
 
 def plugin_root() -> Path:
@@ -86,7 +127,7 @@ def resolve_data_dir(*, create: bool = True) -> Tuple[Path, str]:
             path = installed.resolve()
             source = "codex_plugin_cache"
         else:
-            path = (Path.home() / ".self-improving-skills").resolve()
+            path = user_home() / ".self-improving-skills"
             source = "legacy_home"
     if create:
         path.mkdir(parents=True, exist_ok=True)
@@ -98,17 +139,56 @@ def data_dir() -> Path:
     return path
 
 
-def auto_continue_enabled(value: Optional[str] = None) -> bool:
-    """Automatic reviews default on and support an explicit opt-out.
+_ENV_UNSET = object()
+VALID_REVIEW_MODES = {"background", "foreground", "off"}
+TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
-    ``None`` means the environment variable is absent.  Any explicitly set
-    value outside the documented truthy set, including an empty value, turns
-    automatic continuation off.
+
+def resolve_review_mode(
+    mode_value: Any = _ENV_UNSET,
+    legacy_auto_value: Any = _ENV_UNSET,
+) -> Tuple[str, bool]:
+    """Resolve the review mode and whether the explicit mode was invalid.
+
+    ``CODEX_SELF_IMPROVE_MODE`` is authoritative whenever it is present.
+    Legacy ``CODEX_SELF_IMPROVE_AUTO`` values retain their opt-in/opt-out
+    meaning, but a truthy value now selects the non-blocking background mode.
     """
-    raw = os.environ.get("CODEX_SELF_IMPROVE_AUTO") if value is None else value
-    if raw is None:
-        return True
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    raw_mode = (
+        os.environ.get("CODEX_SELF_IMPROVE_MODE")
+        if mode_value is _ENV_UNSET
+        else mode_value
+    )
+    if raw_mode is not None:
+        mode = str(raw_mode).strip().lower()
+        if mode in VALID_REVIEW_MODES:
+            return mode, False
+        return "off", True
+
+    raw_auto = (
+        os.environ.get("CODEX_SELF_IMPROVE_AUTO")
+        if legacy_auto_value is _ENV_UNSET
+        else legacy_auto_value
+    )
+    if raw_auto is None:
+        return "background", False
+    if str(raw_auto).strip().lower() in TRUTHY_ENV_VALUES:
+        return "background", False
+    return "off", False
+
+
+def auto_continue_enabled(value: Any = _ENV_UNSET) -> bool:
+    """True only for the explicit compatibility ``foreground`` mode.
+
+    The optional argument is retained for callers that supplied a legacy
+    ``CODEX_SELF_IMPROVE_AUTO`` value directly.  Legacy truthy values resolve
+    to ``background`` and therefore never continue the foreground turn.
+    """
+    if value is _ENV_UNSET:
+        mode, _ = resolve_review_mode()
+    else:
+        mode, _ = resolve_review_mode(None, value)
+    return mode == "foreground"
 
 
 def usage_path() -> Path:
@@ -121,6 +201,13 @@ def usage_lock_path() -> Path:
 
 def backups_lock_path() -> Path:
     return data_dir() / "backups.lock"
+
+
+def operational_lock_path(kind: str, root: Optional[Path] = None) -> Path:
+    """Return the crash-safe transaction lock database for one store lane."""
+    if kind not in {"usage", "backups"}:
+        raise SkillStoreError(f"Unknown operational lock kind: {kind}")
+    return (root or data_dir()) / f"{kind}-lock.sqlite3"
 
 
 def events_path() -> Path:
@@ -166,8 +253,8 @@ def default_skill_roots(cwd: Optional[Path] = None) -> List[Path]:
         ):
             if repo_skills.exists():
                 roots.append(repo_skills)
-        roots.append(Path.home() / ".agents" / "skills")
-        codex_skills = Path.home() / ".codex" / "skills"
+        roots.append(user_home() / ".agents" / "skills")
+        codex_skills = user_home() / ".codex" / "skills"
         if codex_skills.exists():
             roots.append(codex_skills)
 
@@ -181,10 +268,54 @@ def default_skill_roots(cwd: Optional[Path] = None) -> List[Path]:
     return unique
 
 
-def default_create_root() -> Path:
+def configured_write_roots() -> Optional[List[Path]]:
+    """Resolved mutation roots, or ``None`` when compatibility mode applies.
+
+    An explicitly empty value is intentionally different from an unset value:
+    it allows no skill mutations.  Reads always continue to use
+    :func:`default_skill_roots`.
+    """
+    raw = os.environ.get("CODEX_SELF_IMPROVE_WRITE_ROOTS")
+    if raw is None:
+        return None
+    roots: List[Path] = []
+    seen = set()
+    for item in raw.split(os.pathsep):
+        if not item.strip():
+            continue
+        try:
+            resolved = Path(item).expanduser().resolve()
+        except (OSError, RuntimeError) as exc:
+            raise SkillStoreError(f"Invalid write root '{item}': {exc}") from exc
+        if str(resolved) not in seen:
+            roots.append(resolved)
+            seen.add(str(resolved))
+    return roots
+
+
+def _assert_skill_write_allowed(path: Path) -> Path:
+    """Return the resolved target or reject a read-only/path-escape target."""
+    roots = configured_write_roots()
+    try:
+        resolved = path.expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise SkillStoreError(f"Could not resolve skill mutation target '{path}': {exc}") from exc
+    if roots is None:
+        return resolved
+    for root in roots:
+        if resolved == root or root in resolved.parents:
+            return resolved
+    allowed = ", ".join(str(root) for root in roots) or "(none)"
+    raise SkillStoreError(
+        f"Skill mutation target '{path}' resolves outside configured write roots: {allowed}."
+    )
+
+
+def default_create_root(*, create: bool = True) -> Path:
     env = os.environ.get("CODEX_SELF_IMPROVE_CREATE_ROOT")
-    root = Path(env).expanduser() if env else Path.home() / ".codex" / "skills"
-    root.mkdir(parents=True, exist_ok=True)
+    root = Path(env).expanduser() if env else user_home() / ".codex" / "skills"
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
     return root.resolve()
 
 
@@ -244,35 +375,161 @@ def append_jsonl(path: Path, record: Dict[str, Any]) -> None:
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+LOCK_BUSY_TIMEOUT_MS = 60_000
+_SQLITE_LOCK_SUFFIXES = ("", "-journal", "-wal", "-shm")
+
+
+def _assert_private_regular_file(path: Path, *, label: str) -> None:
+    """Fail closed before a lock backend can follow a symlink."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode):
+        raise SkillStoreError(f"Refusing symlinked {label}: {path}")
+    if not stat.S_ISREG(info.st_mode):
+        raise SkillStoreError(f"{label.capitalize()} is not a regular file: {path}")
+    if int(getattr(info, "st_nlink", 1)) != 1:
+        raise SkillStoreError(f"Refusing hard-linked {label}: {path}")
+
+
+def _prepare_private_file(path: Path, *, create: bool, label: str) -> bool:
+    """Validate an existing lock file or create it atomically as mode 0600."""
+    if not create:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    _assert_private_regular_file(path, label=label)
+    if not path.exists():
+        if not create:
+            return False
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError:
+            _assert_private_regular_file(path, label=label)
+        else:
+            os.close(fd)
+    _assert_private_regular_file(path, label=label)
+    if create:
+        os.chmod(path, 0o600)
+    return True
+
+
 @contextmanager
-def usage_lock() -> Iterable[None]:
-    if fcntl is None:
+def legacy_file_lock(path: Path, *, create: bool = True) -> Iterable[None]:
+    """Coordinate with v0.4 stores using flock or a Windows byte lock."""
+    path = Path(path)
+    if not _prepare_private_file(path, create=create, label="legacy lock file"):
         yield
         return
-    lock = usage_lock_path()
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    with lock.open("w", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    # Binary update mode supports the Windows exclusive-lock API without
+    # changing the legacy file.  msvcrt permits locking one byte beyond EOF,
+    # so an existing zero-length v0.4 lock remains byte-for-byte unchanged.
+    with path.open("rb") as handle:
+        if msvcrt is not None:
+            handle.seek(0)
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        elif msvcrt is not None:  # pragma: no cover - exercised on Windows CI
+            deadline = time.monotonic() + (LOCK_BUSY_TIMEOUT_MS / 1000)
+            while True:
+                handle.seek(0)
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as exc:
+                    if time.monotonic() >= deadline:
+                        raise SkillStoreError(
+                            f"Timed out acquiring legacy lock file: {path}"
+                        ) from exc
+                    time.sleep(0.05)
         try:
             yield
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:  # pragma: no cover - exercised on Windows CI
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+@contextmanager
+def sqlite_transaction_lock(
+    root: Path,
+    kind: str,
+    *,
+    create: bool = True,
+) -> Iterable[None]:
+    """Hold ``BEGIN IMMEDIATE`` for the context lifetime.
+
+    SQLite's operating-system lock is released when a process exits, including
+    an ungraceful termination.  Separate databases preserve the established
+    usage -> backups hierarchy, so archive operations can safely nest the
+    backup lane while retaining the usage lane.
+    """
+    path = operational_lock_path(kind, Path(root))
+    for suffix in _SQLITE_LOCK_SUFFIXES:
+        _assert_private_regular_file(Path(f"{path}{suffix}"), label="SQLite lock file")
+    if not _prepare_private_file(path, create=create, label="SQLite lock file"):
+        yield
+        return
+    connection: Optional[sqlite3.Connection] = None
+    try:
+        try:
+            connection = sqlite3.connect(
+                str(path),
+                timeout=LOCK_BUSY_TIMEOUT_MS / 1000,
+                isolation_level=None,
+            )
+            connection.execute(f"PRAGMA busy_timeout={LOCK_BUSY_TIMEOUT_MS}")
+            connection.execute("PRAGMA journal_mode=DELETE")
+            connection.execute("BEGIN IMMEDIATE")
+            for suffix in _SQLITE_LOCK_SUFFIXES:
+                sidecar = Path(f"{path}{suffix}")
+                if sidecar.exists():
+                    _assert_private_regular_file(sidecar, label="SQLite lock file")
+                    os.chmod(sidecar, 0o600)
+        except sqlite3.Error as exc:
+            raise SkillStoreError(f"Could not acquire {kind} transaction lock: {exc}") from exc
+    except BaseException:
+        if connection is not None:
+            connection.close()
+        raise
+    try:
+        yield
+    finally:
+        try:
+            connection.rollback()
+        finally:
+            connection.close()
+
+
+@contextmanager
+def store_lock(kind: str, root: Optional[Path] = None, *, create: bool = True) -> Iterable[None]:
+    """Acquire the legacy and SQLite lock layers in a stable order."""
+    store = Path(root) if root is not None else data_dir()
+    with legacy_file_lock(store / f"{kind}.lock", create=create):
+        with sqlite_transaction_lock(store, kind, create=create):
+            yield
+
+
+@contextmanager
+def usage_lock() -> Iterable[None]:
+    with store_lock("usage"):
+        yield
 
 
 @contextmanager
 def backups_lock() -> Iterable[None]:
     """Serialize backup creation, restore reads, pruning, and migration."""
-    if fcntl is None:
+    with store_lock("backups"):
         yield
-        return
-    lock = backups_lock_path()
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    with lock.open("a", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def mutate_usage(mutator: Any) -> Any:
@@ -763,8 +1020,13 @@ def create_skill(
     # the stamp ADDS characters — near-limit input must fail validation here,
     # not produce a file that every later validation pass rejects
     validate_skill_content(content, expected_name=name)
-    target_root = Path(root).expanduser().resolve() if root else default_create_root()
+    target_root = (
+        Path(root).expanduser().resolve()
+        if root
+        else default_create_root(create=False)
+    )
     skill_dir = target_root / name
+    _assert_skill_write_allowed(skill_dir)
     if skill_dir.exists():
         raise SkillStoreError(f"Skill '{name}' already exists at {skill_dir}.")
     skill_dir.mkdir(parents=True, exist_ok=False)
@@ -793,6 +1055,7 @@ def patch_skill(name: str, old_text: str, new_text: str, file_path: str = "SKILL
     skill_dir = find_skill(name)
     if not skill_dir:
         raise SkillStoreError(f"Skill '{name}' was not found.")
+    _assert_skill_write_allowed(skill_dir)
     rel = _safe_relative_path(file_path)
     target = _resolve_inside(skill_dir, rel)
     if not target.exists():
@@ -830,6 +1093,7 @@ def write_support_file(name: str, file_path: str, content: str) -> Dict[str, Any
     skill_dir = find_skill(name)
     if not skill_dir:
         raise SkillStoreError(f"Skill '{name}' was not found.")
+    _assert_skill_write_allowed(skill_dir)
     rel = _safe_relative_path(file_path)
     target = _resolve_inside(skill_dir, rel)
     if rel == Path("SKILL.md"):
@@ -850,8 +1114,10 @@ def write_support_file(name: str, file_path: str, content: str) -> Dict[str, Any
 
 def pin_skill(name: str, pinned: bool = True) -> Dict[str, Any]:
     name = validate_name(name)
-    if not find_skill(name, include_archived=True):
+    skill_dir = find_skill(name, include_archived=True)
+    if not skill_dir:
         raise SkillStoreError(f"Skill '{name}' was not found.")
+    _assert_skill_write_allowed(skill_dir)
 
     def _mutate(data: Dict[str, Any]) -> None:
         rec = data.setdefault("skills", {}).setdefault(name, {"created_at": now_iso(), "state": "active"})
@@ -866,6 +1132,7 @@ def archive_skill(name: str) -> Dict[str, Any]:
     skill_dir = find_skill(name)
     if not skill_dir:
         raise SkillStoreError(f"Skill '{name}' was not found.")
+    _assert_skill_write_allowed(skill_dir)
     with usage_lock():
         data = load_usage()
         rec = data.setdefault("skills", {}).setdefault(name, {"created_at": now_iso(), "state": "active"})
@@ -884,6 +1151,7 @@ def archive_skill(name: str) -> Dict[str, Any]:
             while archive_dir.exists():
                 stamp += 1
                 archive_dir = root / ".archive" / f"{name}-{stamp}"
+        _assert_skill_write_allowed(archive_dir)
         backup = backup_skill(skill_dir, reason="archive")
         archive_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(skill_dir), str(archive_dir))
@@ -953,6 +1221,8 @@ def restore_skill(name: str, root: Optional[str] = None) -> Dict[str, Any]:
             archived = sorted(candidates, key=lambda p: p.name)[-1]
         dest_name = _archived_dest_name(archived)
         dest = skill_root / dest_name
+        _assert_skill_write_allowed(archived)
+        _assert_skill_write_allowed(dest)
         if dest.exists():
             raise SkillStoreError(f"Restore destination already exists: {dest}")
         shutil.move(str(archived), str(dest))
@@ -995,7 +1265,8 @@ def restore_backup(backup_id: str) -> Dict[str, Any]:
     if not backup_id or "/" in backup_id or "\\" in backup_id or backup_id.startswith("."):
         raise SkillStoreError("backup_id must be an exact backup name.")
     with backups_lock():
-        src = data_dir() / "backups" / backup_id
+        backup_root = data_dir() / "backups"
+        src = _resolve_inside(backup_root, Path(backup_id))
         if not src.is_dir():
             raise SkillStoreError(f"Backup '{backup_id}' was not found.")
         manifest = load_json(src / "manifest.json", {})
@@ -1006,7 +1277,12 @@ def restore_backup(backup_id: str) -> Dict[str, Any]:
         # pick the first root in search order, so a user-root backup could
         # overwrite a same-named repo-root skill while the original remains.
         source = str(manifest.get("source") or "")
-        dest = Path(source).expanduser() if source else default_create_root() / name
+        dest = (
+            Path(source).expanduser()
+            if source
+            else default_create_root(create=False) / name
+        )
+        _assert_skill_write_allowed(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         def _ignore_root_manifest(dirpath: str, names: List[str]) -> set:
@@ -1019,6 +1295,7 @@ def restore_backup(backup_id: str) -> Dict[str, Any]:
         # Copy under the shared backup lock. Once staging is complete, prune
         # can safely remove the source without affecting this restore.
         staging = dest.parent / f".{dest.name}.restore-staging"
+        _assert_skill_write_allowed(staging)
         shutil.rmtree(staging, ignore_errors=True)
         shutil.copytree(src, staging, ignore=_ignore_root_manifest)
         undo = None
@@ -1030,6 +1307,7 @@ def restore_backup(backup_id: str) -> Dict[str, Any]:
                     reason=f"pre-restore:{backup_id}",
                 )["backup_id"]
                 aside = dest.parent / f".{dest.name}.restore-aside"
+                _assert_skill_write_allowed(aside)
                 shutil.rmtree(aside, ignore_errors=True)
                 dest.rename(aside)
             staging.rename(dest)
@@ -1174,6 +1452,8 @@ def curate(dry_run: bool = True, stale_days: int = 30, archive_days: int = 90) -
             if row["candidate_action"] == "archive":
                 applied.append(archive_skill(row["name"]))
             elif row["candidate_action"] == "mark_stale":
+                _assert_skill_write_allowed(Path(row["path"]).parent)
+
                 def _mark_stale(data: Dict[str, Any], skill_name: str = row["name"]) -> None:
                     rec = data.setdefault("skills", {}).setdefault(skill_name, {"created_at": now_iso()})
                     rec["state"] = "stale"
@@ -1181,6 +1461,8 @@ def curate(dry_run: bool = True, stale_days: int = 30, archive_days: int = 90) -
                 mutate_usage(_mark_stale)
                 applied.append({"action": "mark_stale", "name": row["name"]})
             elif row["candidate_action"] == "reactivate":
+                _assert_skill_write_allowed(Path(row["path"]).parent)
+
                 def _reactivate(data: Dict[str, Any], skill_name: str = row["name"]) -> None:
                     rec = data.setdefault("skills", {}).setdefault(skill_name, {"created_at": now_iso()})
                     rec["state"] = "active"
@@ -1240,6 +1522,61 @@ def status() -> Dict[str, Any]:
     usage = load_usage()
     state = load_state()
     active_data_dir, data_dir_source = resolve_data_dir()
+    review_mode, mode_invalid = resolve_review_mode()
+    queue_summary: Dict[str, Any] = {
+        "available": False,
+        "pending": 0,
+        "running": 0,
+        "done": 0,
+        "failed": 0,
+        "blocked": 0,
+    }
+    worker_summary: Dict[str, Any] = {
+        "available": False,
+        "active": False,
+        "state": "unavailable",
+    }
+    last_failure: Optional[Dict[str, Any]] = None
+    try:
+        # Keep the core skill store importable in minimal/source-checkout
+        # environments where the background worker files are not present yet.
+        from review_queue import JOB_STATUSES, ReviewQueue, _pid_matches_identity
+
+        review_status = ReviewQueue().status()
+        queue_summary["available"] = True
+        for job_status in JOB_STATUSES:
+            queue_summary[job_status] = int(
+                (review_status.get("counts") or {}).get(job_status, 0)
+            )
+        worker = review_status.get("worker")
+        worker_active = bool(
+            worker and float(worker.get("expires_at") or 0) > time.time()
+            and _pid_matches_identity(
+                worker.get("pid"), worker.get("pid_identity")
+            )
+        )
+        worker_summary = {
+            "available": True,
+            "active": worker_active,
+            "state": "running" if worker_active else ("stale" if worker else "idle"),
+            "pid": int(worker["pid"]) if worker and worker.get("pid") else None,
+            "heartbeat_at": worker.get("heartbeat_at") if worker else None,
+            "expires_at": worker.get("expires_at") if worker else None,
+        }
+        failure = review_status.get("last_failure")
+        if failure:
+            # Do not expose stderr/diagnostic text here. A failed child process
+            # can echo transcript evidence into its diagnostics.
+            last_failure = {
+                "job_id": int(failure["id"]),
+                "error_code": failure.get("error_code"),
+                "updated_at": failure.get("updated_at"),
+            }
+    except Exception as exc:
+        # Status remains useful when SQLite is unavailable or a pre-0.5.0
+        # installation does not contain the queue module.
+        queue_summary["error"] = exc.__class__.__name__
+        worker_summary["error"] = exc.__class__.__name__
     return {
         "plugin_root": str(plugin_root()),
         "data_dir": str(active_data_dir),
@@ -1257,7 +1594,13 @@ def status() -> Dict[str, Any]:
         },
         "last_curate_at": state.get("last_curate_at"),
         "last_report_path": state.get("last_report_path"),
-        "auto_continue": auto_continue_enabled(),
+        "review_mode": review_mode,
+        "automatic_review": review_mode != "off",
+        "auto_continue": review_mode == "foreground",
+        "mode_invalid": mode_invalid,
+        "queue": queue_summary,
+        "worker": worker_summary,
+        "last_failure": last_failure,
     }
 
 
