@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Codex Stop hook: detect self-improvement signals and optionally continue.
+"""Codex Stop hook: detect self-improvement signals and request review.
 
 Trigger design (Hermes codex_runtime port):
   * The interval trigger counts accumulated TOOL ITERATIONS (bumped by the
@@ -42,10 +42,6 @@ SIGNAL_RE = re.compile(
 
 MAX_TRACKED_TRANSCRIPTS = 20
 SKILL_MENTION_RE = re.compile(r"\$([a-z0-9][a-z0-9._-]{0,63})")
-
-
-def _truthy(value: str | None) -> bool:
-    return (value or "").lower() in {"1", "true", "yes", "on"}
 
 
 def _iter_strings(value: Any, depth: int = 0) -> Iterable[str]:
@@ -272,8 +268,7 @@ def main() -> int:
     }
     record_review_signal(record)
 
-    auto = _truthy(os.environ.get("CODEX_SELF_IMPROVE_AUTO"))
-    if not auto:
+    if not skill_store.auto_continue_enabled():
         return 0
 
     should_continue = signal or (interval > 0 and iters >= interval)

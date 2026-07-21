@@ -105,6 +105,35 @@ def test_interval_trigger_uses_tool_counter_and_resets(tmp_path):
     assert "iters_since_review" not in usage["counters"]  # legacy key migrated
 
 
+def test_interval_trigger_auto_continues_when_env_is_unset(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir(parents=True)
+    (data / "usage.json").write_text(json.dumps({
+        "version": 1, "skills": {}, "tools": {},
+        "counters": {"iters_since_review": 10},
+    }), encoding="utf-8")
+
+    proc = _run_stop(tmp_path, {"turn_id": "default-on"})
+    out = json.loads(proc.stdout.strip())
+    assert out["decision"] == "block"
+
+
+def test_explicit_non_truthy_value_disables_auto_continue(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir(parents=True)
+    (data / "usage.json").write_text(json.dumps({
+        "version": 1, "skills": {}, "tools": {},
+        "counters": {"iters_since_review": 10},
+    }), encoding="utf-8")
+
+    proc = _run_stop(
+        tmp_path,
+        {"turn_id": "explicit-off"},
+        extra_env={"CODEX_SELF_IMPROVE_AUTO": "off"},
+    )
+    assert proc.stdout.strip() == ""
+
+
 def test_below_counter_threshold_does_not_continue(tmp_path):
     data = tmp_path / "data"
     data.mkdir(parents=True)

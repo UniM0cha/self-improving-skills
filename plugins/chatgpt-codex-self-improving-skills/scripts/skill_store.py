@@ -45,11 +45,70 @@ def plugin_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def data_dir() -> Path:
+def _installed_plugin_data_dir(root: Optional[Path] = None) -> Optional[Path]:
+    """Derive Codex's writable plugin-data directory from an installed cache.
+
+    Plugin hooks receive ``PLUGIN_DATA`` directly, but plugin-provided MCP
+    servers currently only have the installed ``PLUGIN_ROOT``.  Codex installs
+    marketplace plugins as::
+
+        <codex-home>/plugins/cache/<marketplace>/<plugin>/<version>
+
+    and stores hook data as::
+
+        <codex-home>/plugins/data/<plugin>-<marketplace>
+
+    Keeping this derivation here makes hooks, the MCP server, and the CLI use
+    one store without depending on an undocumented MCP environment variable.
+    """
+    resolved = (root or plugin_root()).expanduser().resolve()
+    plugin_dir = resolved.parent
+    marketplace_dir = plugin_dir.parent
+    cache_dir = marketplace_dir.parent
+    plugins_dir = cache_dir.parent
+    codex_home = plugins_dir.parent
+    if cache_dir.name != "cache" or plugins_dir.name != "plugins":
+        return None
+    if not plugin_dir.name or not marketplace_dir.name:
+        return None
+    return codex_home / "plugins" / "data" / f"{plugin_dir.name}-{marketplace_dir.name}"
+
+
+def resolve_data_dir(*, create: bool = True) -> Tuple[Path, str]:
+    """Return the active data directory and the rule that selected it."""
     env = os.environ.get("PLUGIN_DATA")
-    path = Path(env).expanduser() if env else Path.home() / ".self-improving-skills"
-    path.mkdir(parents=True, exist_ok=True)
+    if env:
+        path = Path(env).expanduser().resolve()
+        source = "plugin_data_env"
+    else:
+        installed = _installed_plugin_data_dir()
+        if installed is not None:
+            path = installed.resolve()
+            source = "codex_plugin_cache"
+        else:
+            path = (Path.home() / ".self-improving-skills").resolve()
+            source = "legacy_home"
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path, source
+
+
+def data_dir() -> Path:
+    path, _ = resolve_data_dir()
     return path
+
+
+def auto_continue_enabled(value: Optional[str] = None) -> bool:
+    """Automatic reviews default on and support an explicit opt-out.
+
+    ``None`` means the environment variable is absent.  Any explicitly set
+    value outside the documented truthy set, including an empty value, turns
+    automatic continuation off.
+    """
+    raw = os.environ.get("CODEX_SELF_IMPROVE_AUTO") if value is None else value
+    if raw is None:
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def usage_path() -> Path:
@@ -58,6 +117,10 @@ def usage_path() -> Path:
 
 def usage_lock_path() -> Path:
     return data_dir() / "usage.lock"
+
+
+def backups_lock_path() -> Path:
+    return data_dir() / "backups.lock"
 
 
 def events_path() -> Path:
@@ -189,6 +252,22 @@ def usage_lock() -> Iterable[None]:
     lock = usage_lock_path()
     lock.parent.mkdir(parents=True, exist_ok=True)
     with lock.open("w", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def backups_lock() -> Iterable[None]:
+    """Serialize backup creation, restore reads, pruning, and migration."""
+    if fcntl is None:
+        yield
+        return
+    lock = backups_lock_path()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("a", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
             yield
@@ -458,7 +537,7 @@ def _frontmatter_pinned(skill_dir: Path) -> bool:
     return str(meta.get("pinned") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def backup_skill(skill_dir: Path, reason: str = "manual") -> Dict[str, Any]:
+def _backup_skill_unlocked(skill_dir: Path, reason: str = "manual") -> Dict[str, Any]:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     name = read_skill_name(skill_dir / "SKILL.md")
     base_id = f"{ts}-{name}"
@@ -479,6 +558,11 @@ def backup_skill(skill_dir: Path, reason: str = "manual") -> Dict[str, Any]:
     }
     atomic_write_json(dest / "manifest.json", manifest)
     return manifest
+
+
+def backup_skill(skill_dir: Path, reason: str = "manual") -> Dict[str, Any]:
+    with backups_lock():
+        return _backup_skill_unlocked(skill_dir, reason=reason)
 
 
 def load_usage() -> Dict[str, Any]:
@@ -910,48 +994,52 @@ def restore_backup(backup_id: str) -> Dict[str, Any]:
     rollback itself is undoable (Hermes curator_backup pattern)."""
     if not backup_id or "/" in backup_id or "\\" in backup_id or backup_id.startswith("."):
         raise SkillStoreError("backup_id must be an exact backup name.")
-    src = data_dir() / "backups" / backup_id
-    if not src.is_dir():
-        raise SkillStoreError(f"Backup '{backup_id}' was not found.")
-    manifest = load_json(src / "manifest.json", {})
-    if not isinstance(manifest, dict) or not manifest.get("skill"):
-        raise SkillStoreError(f"Backup '{backup_id}' has no readable manifest.")
-    name = validate_name(str(manifest["skill"]))
-    # Restore to the backup's ORIGINAL path only — find_skill(name) would pick
-    # the first root in search order, so a user-root backup could overwrite a
-    # same-named repo-root skill while the real original stays untouched.
-    source = str(manifest.get("source") or "")
-    dest = Path(source).expanduser() if source else default_create_root() / name
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    with backups_lock():
+        src = data_dir() / "backups" / backup_id
+        if not src.is_dir():
+            raise SkillStoreError(f"Backup '{backup_id}' was not found.")
+        manifest = load_json(src / "manifest.json", {})
+        if not isinstance(manifest, dict) or not manifest.get("skill"):
+            raise SkillStoreError(f"Backup '{backup_id}' has no readable manifest.")
+        name = validate_name(str(manifest["skill"]))
+        # Restore to the backup's ORIGINAL path only — find_skill(name) would
+        # pick the first root in search order, so a user-root backup could
+        # overwrite a same-named repo-root skill while the original remains.
+        source = str(manifest.get("source") or "")
+        dest = Path(source).expanduser() if source else default_create_root() / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
 
-    def _ignore_root_manifest(dirpath: str, names: List[str]) -> set:
-        # exclude ONLY the backup-root metadata manifest — a skill's own
-        # nested references/manifest.json etc. must survive the restore
-        if Path(dirpath).resolve() == src.resolve():
-            return {"manifest.json"} & set(names)
-        return set()
+        def _ignore_root_manifest(dirpath: str, names: List[str]) -> set:
+            # exclude ONLY the backup-root metadata manifest — a skill's own
+            # nested references/manifest.json etc. must survive the restore
+            if Path(dirpath).resolve() == src.resolve():
+                return {"manifest.json"} & set(names)
+            return set()
 
-    # Stage-then-swap: the copy happens BEFORE the live dir is touched, so a
-    # mid-copy failure (disk full, unreadable backup) leaves the skill as-is.
-    staging = dest.parent / f".{dest.name}.restore-staging"
-    shutil.rmtree(staging, ignore_errors=True)
-    shutil.copytree(src, staging, ignore=_ignore_root_manifest)
-    undo = None
-    aside = None
-    try:
-        if dest.exists():
-            undo = backup_skill(dest, reason=f"pre-restore:{backup_id}")["backup_id"]
-            aside = dest.parent / f".{dest.name}.restore-aside"
-            shutil.rmtree(aside, ignore_errors=True)
-            dest.rename(aside)
-        staging.rename(dest)
-        if aside is not None:
-            shutil.rmtree(aside, ignore_errors=True)
-    except BaseException:
-        if aside is not None and aside.exists() and not dest.exists():
-            aside.rename(dest)  # put the original back
+        # Copy under the shared backup lock. Once staging is complete, prune
+        # can safely remove the source without affecting this restore.
+        staging = dest.parent / f".{dest.name}.restore-staging"
         shutil.rmtree(staging, ignore_errors=True)
-        raise
+        shutil.copytree(src, staging, ignore=_ignore_root_manifest)
+        undo = None
+        aside = None
+        try:
+            if dest.exists():
+                undo = _backup_skill_unlocked(
+                    dest,
+                    reason=f"pre-restore:{backup_id}",
+                )["backup_id"]
+                aside = dest.parent / f".{dest.name}.restore-aside"
+                shutil.rmtree(aside, ignore_errors=True)
+                dest.rename(aside)
+            staging.rename(dest)
+            if aside is not None:
+                shutil.rmtree(aside, ignore_errors=True)
+        except BaseException:
+            if aside is not None and aside.exists() and not dest.exists():
+                aside.rename(dest)  # put the original back
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
 
     def _mutate(data: Dict[str, Any]) -> None:
         rec = data.setdefault("skills", {}).setdefault(name, {"created_at": now_iso()})
@@ -965,7 +1053,10 @@ def restore_backup(backup_id: str) -> Dict[str, Any]:
             "undo_backup": undo}
 
 
-def prune_backups(keep_per_skill: int = 5, protect: Iterable[str] = ()) -> Dict[str, Any]:
+def _prune_backups_unlocked(
+    keep_per_skill: int = 5,
+    protect: Iterable[str] = (),
+) -> Dict[str, Any]:
     """Keep the newest N backups per skill; `protect` names are never removed
     (Hermes fc1119ca: the prune must not delete a backup a restore is using)."""
     keep_per_skill = max(0, int(keep_per_skill))
@@ -989,6 +1080,11 @@ def prune_backups(keep_per_skill: int = 5, protect: Iterable[str] = ()) -> Dict[
                 removed.append(old.name)
     return {"action": "prune_backups", "keep_per_skill": keep_per_skill,
             "removed": sorted(removed)}
+
+
+def prune_backups(keep_per_skill: int = 5, protect: Iterable[str] = ()) -> Dict[str, Any]:
+    with backups_lock():
+        return _prune_backups_unlocked(keep_per_skill, protect)
 
 
 def _parse_time(value: Any) -> Optional[datetime]:
@@ -1143,9 +1239,11 @@ def _write_curate_report(result: Dict[str, Any]) -> Optional[str]:
 def status() -> Dict[str, Any]:
     usage = load_usage()
     state = load_state()
+    active_data_dir, data_dir_source = resolve_data_dir()
     return {
         "plugin_root": str(plugin_root()),
-        "data_dir": str(data_dir()),
+        "data_dir": str(active_data_dir),
+        "data_dir_source": data_dir_source,
         "skill_roots": [str(p) for p in default_skill_roots()],
         "skill_count": len(list_skills()["skills"]),
         "tracked_skill_count": len(usage.get("skills", {})),
@@ -1159,7 +1257,7 @@ def status() -> Dict[str, Any]:
         },
         "last_curate_at": state.get("last_curate_at"),
         "last_report_path": state.get("last_report_path"),
-        "auto_continue": os.environ.get("CODEX_SELF_IMPROVE_AUTO", "").lower() in {"1", "true", "yes", "on"},
+        "auto_continue": auto_continue_enabled(),
     }
 
 

@@ -33,6 +33,74 @@ def _store(tmp_path, monkeypatch, *roots):
     return importlib.reload(skill_store)
 
 
+def test_explicit_plugin_data_wins_over_installed_cache(tmp_path, monkeypatch):
+    explicit = tmp_path / "explicit-data"
+    installed_root = (
+        tmp_path / ".codex" / "plugins" / "cache" / "market" /
+        "chatgpt-codex-self-improving-skills" / "0.4.0"
+    )
+    monkeypatch.setenv("PLUGIN_DATA", str(explicit))
+    monkeypatch.setenv("PLUGIN_ROOT", str(installed_root))
+    import skill_store
+
+    store = importlib.reload(skill_store)
+    path, source = store.resolve_data_dir(create=False)
+    assert path == explicit.resolve()
+    assert source == "plugin_data_env"
+    assert not explicit.exists()  # side-effect-free lookup for dry runs
+
+
+def test_installed_cache_derives_official_plugin_data_path(tmp_path, monkeypatch):
+    codex_home = tmp_path / "custom-codex-home"
+    installed_root = (
+        codex_home / "plugins" / "cache" / "samton-plugins" /
+        "chatgpt-codex-self-improving-skills" / "0.4.0"
+    )
+    monkeypatch.delenv("PLUGIN_DATA", raising=False)
+    monkeypatch.setenv("PLUGIN_ROOT", str(installed_root))
+    import skill_store
+
+    store = importlib.reload(skill_store)
+    path, source = store.resolve_data_dir(create=False)
+    assert path == (
+        codex_home / "plugins" / "data" /
+        "chatgpt-codex-self-improving-skills-samton-plugins"
+    ).resolve()
+    assert source == "codex_plugin_cache"
+    assert not path.exists()
+
+
+def test_source_checkout_keeps_legacy_home_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("PLUGIN_DATA", raising=False)
+    monkeypatch.setenv("PLUGIN_ROOT", str(tmp_path / "src" / "plugin"))
+    import skill_store
+
+    store = importlib.reload(skill_store)
+    path, source = store.resolve_data_dir(create=False)
+    assert path == (tmp_path / ".self-improving-skills").resolve()
+    assert source == "legacy_home"
+    assert not path.exists()
+
+
+def test_auto_continue_defaults_on_and_allows_explicit_opt_out(tmp_path, monkeypatch):
+    monkeypatch.setenv("PLUGIN_DATA", str(tmp_path / "data"))
+    monkeypatch.delenv("CODEX_SELF_IMPROVE_AUTO", raising=False)
+    import skill_store
+
+    store = importlib.reload(skill_store)
+    assert store.auto_continue_enabled() is True
+    for value in ("1", "true", "TRUE", "yes", "on"):
+        monkeypatch.setenv("CODEX_SELF_IMPROVE_AUTO", value)
+        assert store.auto_continue_enabled() is True
+    for value in ("0", "false", "no", "off", "", "unexpected"):
+        monkeypatch.setenv("CODEX_SELF_IMPROVE_AUTO", value)
+        assert store.auto_continue_enabled() is False
+    status = store.status()
+    assert status["auto_continue"] is False
+    assert status["data_dir_source"] == "plugin_data_env"
+
+
 def test_default_create_root_is_codex_skills(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path / "data"))
@@ -364,6 +432,12 @@ def test_restore_backup_targets_original_root_only(tmp_path, monkeypatch):
         encoding="utf-8")
     store = _store(tmp_path, monkeypatch, repo_root, user_root)
     backup_id = store.backup_skill(d, reason="test")["backup_id"]
+    assert (tmp_path / "data" / "backups.lock").is_file()
+
+    def fail_if_restore_reenters(*_args, **_kwargs):
+        raise AssertionError("restore must not re-enter backups_lock")
+
+    monkeypatch.setattr(store, "backup_skill", fail_if_restore_reenters)
     (d / "SKILL.md").write_text(
         "---\nname: shared-name\ndescription: d\n---\nuser edited\n",
         encoding="utf-8")

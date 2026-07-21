@@ -16,6 +16,7 @@ import sys
 from datetime import datetime, timezone
 
 import skill_store
+from data_migration import migrate_data
 from skill_store import (
     SkillStoreError,
     archive_skill,
@@ -119,6 +120,26 @@ def main() -> int:
     scan = sub.add_parser("scan")
     scan.add_argument("name")
 
+    migrate = sub.add_parser(
+        "migrate-data",
+        help="plan or apply a conservative migration from a legacy data directory",
+    )
+    migrate.add_argument("--source", required=True)
+    migrate.add_argument(
+        "--target",
+        default=None,
+        help=(
+            "destination data directory; installed plugins derive it automatically, "
+            "while source checkouts should pass it explicitly"
+        ),
+    )
+    migrate.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="write the planned migration; omitted means dry-run",
+    )
+
     args = parser.parse_args()
     try:
         if args.cmd == "status":
@@ -173,6 +194,8 @@ def main() -> int:
                 "blocking": len(blocking),
                 "warnings": len(findings) - len(blocking),
             }
+        elif args.cmd == "migrate-data":
+            result = migrate_data(args.source, apply=args.apply, target=args.target)
         else:
             raise AssertionError(args.cmd)
     except SkillStoreError as exc:

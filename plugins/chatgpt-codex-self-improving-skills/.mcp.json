@@ -6,7 +6,15 @@
         "./scripts/skill_manager_mcp.py"
       ],
       "cwd": ".",
-      "note": "Local skill-manager MCP for Codex self-improvement. Provides safe skill list/view/create/patch/write/archive/curate/backup/rollback/scan tools with usage telemetry and a read-before-write guard. Startup depends on the plugin-root cwd contract (cwd: '.'); if PLUGIN_ROOT is absent the server falls back to resolving paths from its own file location — do not replace args with env-var substitutions (not a verified Codex contract)."
+      "env_vars": [
+        "CODEX_SELF_IMPROVE_AUTO",
+        "CODEX_SELF_IMPROVE_INTERVAL",
+        "CODEX_SELF_IMPROVE_CURATE_INTERVAL_DAYS",
+        "CODEX_SELF_IMPROVE_CURATE_MIN_SKILLS",
+        "CODEX_SELF_IMPROVE_SKILL_ROOTS",
+        "CODEX_SELF_IMPROVE_CREATE_ROOT"
+      ],
+      "note": "Local skill-manager MCP for Codex self-improvement. Provides safe skill list/view/create/patch/write/archive/curate/backup/rollback/scan tools with usage telemetry and a read-before-write guard. The server derives the official writable data directory from the installed plugin cache when PLUGIN_DATA is unavailable, so hooks and MCP share one store."
     }
   }
 }

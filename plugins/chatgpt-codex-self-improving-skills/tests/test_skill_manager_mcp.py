@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -35,6 +36,51 @@ def test_serverinfo_version_matches_plugin_json(tmp_path):
     manifest = json.loads(open(
         os.path.join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"), encoding="utf-8").read())
     assert responses[0]["result"]["serverInfo"]["version"] == manifest["version"]
+
+
+def test_status_without_plugin_data_uses_installed_cache_store(tmp_path):
+    for marketplace in ("samton-plugins", "self-improving-skills"):
+        codex_home = tmp_path / marketplace / ".codex"
+        installed_root = (
+            codex_home / "plugins" / "cache" / marketplace /
+            "chatgpt-codex-self-improving-skills" / "0.4.0"
+        )
+        shutil.copytree(PLUGIN_ROOT, installed_root)
+        skills_root = tmp_path / marketplace / "skills"
+        skills_root.mkdir()
+        env = dict(os.environ,
+                   CODEX_SELF_IMPROVE_SKILL_ROOTS=str(skills_root),
+                   CODEX_SELF_IMPROVE_CREATE_ROOT=str(skills_root))
+        env.pop("PLUGIN_DATA", None)
+        env.pop("PLUGIN_ROOT", None)
+        config = json.loads(
+            (installed_root / ".mcp.json").read_text(encoding="utf-8")
+        )["mcpServers"]["self-improving-skills"]
+        stdin = "\n".join(json.dumps(r) for r in [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            _call(2, "codex_self_improvement_status", {}),
+        ]) + "\n"
+        proc = subprocess.run(
+            [config["command"], *config["args"]],
+            cwd=installed_root / config["cwd"],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        responses = [
+            json.loads(line) for line in proc.stdout.splitlines() if line.strip()
+        ]
+        by_id = {r["id"]: r for r in responses}
+        status = json.loads(by_id[2]["result"]["content"][0]["text"])
+        expected = (
+            codex_home / "plugins" / "data" /
+            f"chatgpt-codex-self-improving-skills-{marketplace}"
+        ).resolve()
+        assert status["data_dir"] == str(expected)
+        assert status["data_dir_source"] == "codex_plugin_cache"
+        assert status["auto_continue"] is True
 
 
 def test_patch_requires_view_first(tmp_path):

@@ -9,6 +9,7 @@ REPO_ROOT = PLUGIN_ROOT.parents[1]
 MANIFEST_PATH = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 MARKETPLACE_PATH = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
 LEGACY_MARKETPLACE_PATH = REPO_ROOT / ".claude-plugin" / "marketplace.json"
+MCP_PATH = PLUGIN_ROOT / ".mcp.json"
 SEMVER_RE = re.compile(
     r"^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:[-+][0-9A-Za-z.-]+)?$"
 )
@@ -67,3 +68,18 @@ def test_manifest_uses_single_version_source_and_default_hook_discovery():
     assert manifest["interface"]["displayName"]
     assert (PLUGIN_ROOT / "hooks" / "hooks.json").is_file()
     assert (PLUGIN_ROOT / ".mcp.json").is_file()
+
+
+def test_mcp_forwards_documented_settings_but_not_plugin_data():
+    config = load_json(MCP_PATH)["mcpServers"]["self-improving-skills"]
+    forwarded = set(config["env_vars"])
+
+    assert forwarded == {
+        "CODEX_SELF_IMPROVE_AUTO",
+        "CODEX_SELF_IMPROVE_INTERVAL",
+        "CODEX_SELF_IMPROVE_CURATE_INTERVAL_DAYS",
+        "CODEX_SELF_IMPROVE_CURATE_MIN_SKILLS",
+        "CODEX_SELF_IMPROVE_SKILL_ROOTS",
+        "CODEX_SELF_IMPROVE_CREATE_ROOT",
+    }
+    assert "PLUGIN_DATA" not in forwarded

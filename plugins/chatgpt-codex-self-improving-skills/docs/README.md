@@ -6,7 +6,8 @@ This plugin implements a Hermes-inspired learning loop for Codex:
   review trigger, and watches for skill edits that bypassed the skill manager
   (snapshot diff — a direct shell edit gets validated, its patch telemetry
   repaired, and a post-hoc checkpoint backup).
-- `Stop` can optionally request a self-improvement continuation. The interval
+- `Stop` requests a self-improvement continuation by default when a trigger
+  fires. Set `CODEX_SELF_IMPROVE_AUTO=0` to opt out. The interval
   trigger counts accumulated tool iterations (default 10,
   `CODEX_SELF_IMPROVE_INTERVAL`) — not Stop turns — and real skill work
   (create/patch/write through the manager) resets the counter. The signal
@@ -38,7 +39,7 @@ This plugin implements a Hermes-inspired learning loop for Codex:
 
 ## Installation
 
-Add this repository's Codex marketplace and install the plugin:
+Add the repository's Codex marketplace and install the plugin:
 
 ```bash
 codex plugin marketplace add UniM0cha/self-improving-skills
@@ -52,17 +53,33 @@ codex plugin marketplace upgrade self-improving-skills
 codex plugin add chatgpt-codex-self-improving-skills@self-improving-skills
 ```
 
-Start a new Codex task after installing or upgrading so the new plugin package is loaded.
+After installing or upgrading, CLI users should start a new Codex task. Desktop
+users should quit and reopen the app, then start a new task so the new plugin
+package and hooks are loaded.
 
-The default Stop hook is conservative. It records review signals but only
-auto-continues when enabled with:
+The default Stop hook automatically continues into a short review after an
+explicit correction signal or the configured tool-iteration threshold. To
+disable automatic continuation for a shell-launched Codex process:
 
 ```bash
-export CODEX_SELF_IMPROVE_AUTO=1
+export CODEX_SELF_IMPROVE_AUTO=0
 ```
 
-State is stored in `PLUGIN_DATA` when Codex provides it, otherwise under
-`~/.self-improving-skills`.
+For the desktop app, set the value persistently in `~/.codex/config.toml`
+(merge it into an existing table instead of declaring the table twice):
+
+```toml
+[shell_environment_policy.set]
+CODEX_SELF_IMPROVE_AUTO = "0"
+```
+
+An `export` made after the desktop app has started does not change that
+already-running app's environment.
+
+State is stored in `PLUGIN_DATA` when Codex provides it. Installed MCP/CLI
+processes derive the same official directory from their cache path:
+`~/.codex/plugins/data/<plugin>-<marketplace>`. A source checkout that has
+neither value keeps the legacy `~/.self-improving-skills` fallback.
 
 By default, new skills created through the manager are written to
 `~/.codex/skills`. The manager can also read existing user skills from
@@ -87,19 +104,49 @@ Patching or overwriting an EXISTING skill file requires reading it first
 
 | variable | default | meaning |
 |---|---|---|
-| `CODEX_SELF_IMPROVE_AUTO` | off | enable Stop-hook auto-continue into the review pass |
+| `CODEX_SELF_IMPROVE_AUTO` | on | Stop-hook auto-continue into the review pass; set any explicit non-truthy value such as `0`, `false`, `no`, or `off` to disable |
 | `CODEX_SELF_IMPROVE_INTERVAL` | `10` | tool iterations since the last review/skill-work that trigger the interval review (0 disables) |
 | `CODEX_SELF_IMPROVE_CURATE_INTERVAL_DAYS` | `7` | days between SessionStart curator nudges |
 | `CODEX_SELF_IMPROVE_CURATE_MIN_SKILLS` | `8` | tracked-skill count below which the curator nudge stays silent |
 | `CODEX_SELF_IMPROVE_SKILL_ROOTS` | (auto) | override the skill root search list |
 | `CODEX_SELF_IMPROVE_CREATE_ROOT` | `~/.codex/skills` | where new skills are created |
 
+## Data migration
+
+The CLI can import older stores without deleting them. The command is a
+read-only dry-run unless `--apply` is present. When running the CLI from a
+source checkout, pass the installed marketplace's canonical data directory
+explicitly:
+
+```bash
+python3 scripts/skill_manager_cli.py migrate-data --source ~/.self-improving-skills --target ~/.codex/plugins/data/chatgpt-codex-self-improving-skills-self-improving-skills
+python3 scripts/skill_manager_cli.py migrate-data --source ~/.self-improving-skills --target ~/.codex/plugins/data/chatgpt-codex-self-improving-skills-self-improving-skills --apply
+```
+
+These examples assume the default Codex home (`~/.codex`). If Codex uses a
+custom home, replace that prefix with the active Codex home path.
+
+An installed-cache copy derives that same target automatically, so
+`--target` can be omitted there. Stop other Codex processes that still use the
+legacy source before applying. The migration verifies that the source stayed
+stable while it was snapshotted and aborts before importing active data if it
+detects a concurrent change.
+
+Before applying, it snapshots both source and target under a sibling
+`<target>-migration-backups/` directory. Skill usage metadata is merged
+conservatively, live target tool/session counters stay authoritative, backup
+content is deduplicated, and historical logs/signals/state are preserved under
+`imports/` instead of being replayed into live state. Re-running the same
+import is idempotent.
+
 ## MCP server startup contract
 
-`.mcp.json` starts the skill manager with `cwd: "."` (the plugin root) and a
-relative script path — the server resolves the plugin root from `PLUGIN_ROOT`
-when Codex provides it, else from its own `__file__` location, so path
-resolution survives either launch shape. `serverInfo.version` is read from
+`.mcp.json` starts the skill manager with `cwd: "."` (the plugin root), a
+relative script path, and an allowlist of documented `CODEX_SELF_IMPROVE_*`
+settings. The server resolves the plugin root from `PLUGIN_ROOT` when Codex
+provides it, else from its own `__file__` location, and derives Codex's
+writable plugin-data directory from an installed cache path when
+`PLUGIN_DATA` is absent. `serverInfo.version` is read from
 `.codex-plugin/plugin.json` at initialize time (a hardcoded version literal
 drifted from the manifest once; never reintroduce one).
 
