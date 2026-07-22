@@ -1,15 +1,19 @@
-name: Codex self-improvement plugin
+name: Codex and ChatGPT Work self-improvement plugins
 
 on:
   pull_request:
     paths:
       - "plugins/chatgpt-codex-self-improving-skills/**"
+      - "plugins/chatgpt-work-self-improving-skills/**"
+      - "chatgpt-work/**"
       - ".agents/plugins/marketplace.json"
       - ".github/workflows/codex-self-improvement.yml"
   push:
     branches: [main]
     paths:
       - "plugins/chatgpt-codex-self-improving-skills/**"
+      - "plugins/chatgpt-work-self-improving-skills/**"
+      - "chatgpt-work/**"
       - ".agents/plugins/marketplace.json"
       - ".github/workflows/codex-self-improvement.yml"
 
@@ -26,8 +30,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python -m pip install pytest pytest-timeout
-      - run: python -m pytest -vv --timeout=60 plugins/chatgpt-codex-self-improving-skills/tests
+      - run: python -m pip install pytest pytest-timeout pyyaml
+      - name: Test Codex plugin
+        run: python -m pytest -vv --timeout=60 plugins/chatgpt-codex-self-improving-skills/tests
+      - name: Test ChatGPT Work plugin
+        run: python -m pytest -vv --timeout=60 plugins/chatgpt-work-self-improving-skills/tests
       - run: python -m compileall -q plugins/chatgpt-codex-self-improving-skills/scripts
       - name: Execute Windows hook wrapper
         if: runner.os == 'Windows'
@@ -44,5 +51,6 @@ jobs:
               Path("plugins/chatgpt-codex-self-improving-skills/.codex-plugin/plugin.json"),
               Path("plugins/chatgpt-codex-self-improving-skills/.mcp.json"),
               Path("plugins/chatgpt-codex-self-improving-skills/hooks/hooks.json"),
+              Path("plugins/chatgpt-work-self-improving-skills/.codex-plugin/plugin.json"),
           ):
               json.loads(path.read_text(encoding="utf-8"))

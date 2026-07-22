@@ -21,7 +21,7 @@ One repo, four ports of the same closed learning loop:
 | `claude-code-self-improving-skills` | Claude Code CLI (this README's main subject) |
 | `claude-cowork-self-improving-skills` | Claude Cowork (cloud container) — persists skills via claude.ai '스킬 저장' |
 | `chatgpt-codex-self-improving-skills` | OpenAI Codex CLI (hooks + MCP skill manager) |
-| `chatgpt-work-self-improving-skills` | ChatGPT desktop Work (skills-only package, under `chatgpt-work/`) |
+| `chatgpt-work-self-improving-skills` | ChatGPT desktop Work (skills-only package in the shared `plugins/` directory) |
 
 Install one per environment — do not install two variants into the same environment (duplicate hooks/nudges).
 
@@ -149,9 +149,9 @@ The learned skills live in your user directory, not inside the plugin. Updating 
 ```text
 .claude-plugin/marketplace.json          # Claude Code marketplace manifest (2 plugins)
 .agents/plugins/marketplace.json         # Codex + ChatGPT Work marketplace manifest
-chatgpt-work/                            # Work plugin source, registered by the root marketplace
 plugins/claude-cowork-self-improving-skills/   # Cowork variant
 plugins/chatgpt-codex-self-improving-skills/   # Codex variant
+plugins/chatgpt-work-self-improving-skills/    # ChatGPT Work variant
 plugins/claude-code-self-improving-skills/
   .claude-plugin/plugin.json             # plugin metadata
   hooks/                                 # Stop, SessionStart, PreToolUse, PostToolUse wrappers

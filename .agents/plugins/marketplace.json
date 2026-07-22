@@ -20,7 +20,7 @@
       "name": "chatgpt-work-self-improving-skills",
       "source": {
         "source": "local",
-        "path": "./chatgpt-work/plugins/chatgpt-work-self-improving-skills"
+        "path": "./plugins/chatgpt-work-self-improving-skills"
       },
       "policy": {
         "installation": "AVAILABLE",

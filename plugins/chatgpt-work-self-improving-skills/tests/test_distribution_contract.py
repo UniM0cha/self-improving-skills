@@ -8,11 +8,18 @@ import yaml
 PLUGIN_NAME = "chatgpt-work-self-improving-skills"
 SKILL_NAME = "work-self-improvement-review"
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-WORK_ROOT = PLUGIN_ROOT.parents[1]
-REPO_ROOT = PLUGIN_ROOT.parents[2]
+REPO_ROOT = PLUGIN_ROOT.parents[1]
 MANIFEST_PATH = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 MARKETPLACE_PATH = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
-NESTED_MARKETPLACE_PATH = WORK_ROOT / ".agents" / "plugins" / "marketplace.json"
+PLUGIN_LOCAL_MARKETPLACE_PATH = (
+    PLUGIN_ROOT / ".agents" / "plugins" / "marketplace.json"
+)
+LEGACY_WORK_MARKETPLACE_PATH = (
+    REPO_ROOT / "chatgpt-work" / ".agents" / "plugins" / "marketplace.json"
+)
+LEGACY_PLUGIN_ROOT = (
+    REPO_ROOT / "chatgpt-work" / "plugins" / "chatgpt-work-self-improving-skills"
+)
 SEMVER_RE = re.compile(
     r"^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:[-+][0-9A-Za-z.-]+)?$"
 )
@@ -71,7 +78,7 @@ def test_repo_marketplace_exposes_one_work_entry_without_product_gating():
     assert entry["name"] == manifest["name"] == PLUGIN_ROOT.name
     assert entry["source"] == {
         "source": "local",
-        "path": "./chatgpt-work/plugins/chatgpt-work-self-improving-skills",
+        "path": "./plugins/chatgpt-work-self-improving-skills",
     }
     assert entry["policy"] == {
         "installation": "AVAILABLE",
@@ -80,7 +87,9 @@ def test_repo_marketplace_exposes_one_work_entry_without_product_gating():
     assert entry["category"] == manifest["interface"]["category"] == "Productivity"
     assert "products" not in entry["policy"]
     assert "version" not in entry
-    assert not NESTED_MARKETPLACE_PATH.exists()
+    assert not PLUGIN_LOCAL_MARKETPLACE_PATH.exists()
+    assert not LEGACY_WORK_MARKETPLACE_PATH.exists()
+    assert not LEGACY_PLUGIN_ROOT.exists()
 
 
 def test_skill_metadata_and_work_invocation_contract():
