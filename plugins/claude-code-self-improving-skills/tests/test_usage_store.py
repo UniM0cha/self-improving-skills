@@ -38,6 +38,27 @@ def test_offsets_legacy_int_and_migration(sandbox):
     assert us.get_offset("fresh") == 9
 
 
+def test_offset_never_moves_backwards(sandbox):
+    """Transcripts are written asynchronously, so a hook can read a shorter
+    file than the previous pass did. Letting the mark rewind would make the
+    next scan re-count everything in between as new."""
+    us = sandbox.usage_store
+    us.apply_events([], "s1", 100)
+    us.apply_events([], "s1", 40)
+    assert us.get_offset("s1") == 100
+    us.apply_events([], "s1", 140)
+    assert us.get_offset("s1") == 140
+
+
+def test_offset_does_not_rewind_over_a_legacy_int_entry(sandbox):
+    us = sandbox.usage_store
+    data = us.load()
+    data.setdefault("_meta", {}).setdefault("offsets", {})["legacy"] = 50
+    us._save(data)
+    us.apply_events([], "legacy", 10)
+    assert us.get_offset("legacy") == 50
+
+
 def test_meta_prune_cap_and_bad_timestamps(sandbox):
     us = sandbox.usage_store
     data = us.load()

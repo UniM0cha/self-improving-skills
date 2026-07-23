@@ -33,6 +33,11 @@ import time
 from datetime import datetime, timezone
 from typing import NoReturn
 
+import sis_io
+
+# Pin UTF-8 before this tool's (Korean-bearing) JSON is printed; see sis_io.
+sis_io.pin_utf8_stdio()
+
 META_FILE = ".sis-pr.json"
 
 

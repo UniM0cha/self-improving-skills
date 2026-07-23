@@ -22,10 +22,27 @@ SCRIPTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scr
 sys.path.insert(0, SCRIPTS_DIR)
 
 
+def _sandbox_home_env(home):
+    """The env vars that redirect a home directory on every supported OS.
+
+    HOME alone is not enough: ntpath.expanduser consults USERPROFILE (then
+    HOMEDRIVE+HOMEPATH) and ignores HOME entirely, so a HOME-only sandbox
+    silently writes into the developer's REAL ~/.claude on Windows.
+    """
+    drive, tail = os.path.splitdrive(str(home))
+    return {
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "HOMEDRIVE": drive,
+        "HOMEPATH": tail or os.sep,
+    }
+
+
 @pytest.fixture
 def sandbox(tmp_path, monkeypatch):
     """Sandboxed HOME + freshly-reloaded modules bound to it."""
-    monkeypatch.setenv("HOME", str(tmp_path))
+    for key, value in _sandbox_home_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
     import curator_backup
     import curator_transitions
     import usage_store
@@ -53,11 +70,18 @@ def sandbox(tmp_path, monkeypatch):
     )
 
 
-def _run_script(home, script, payload):
-    env = dict(os.environ, HOME=str(home))
+def _run_script(home, script, payload, extra_env=None):
+    env = dict(os.environ, **_sandbox_home_env(home))
+    env.update(extra_env or {})
     p = subprocess.run(
         [sys.executable, os.path.join(SCRIPTS_DIR, script)],
-        input=json.dumps(payload), capture_output=True, text=True, env=env)
+        # ensure_ascii=False so a non-ASCII path/message reaches the hook as raw
+        # UTF-8 bytes, exactly as Claude Code (Node JSON.stringify) delivers it —
+        # \u-escaping it here would hide the very decode path a Windows codepage
+        # breaks. Decode the hook's stdout as UTF-8 too, matching what the
+        # scripts now pin, not the parent's locale codec (cp1252 on Windows).
+        input=json.dumps(payload, ensure_ascii=False),
+        capture_output=True, text=True, encoding="utf-8", env=env)
     return p.stdout
 
 
@@ -69,13 +93,21 @@ def tool_use(name, inp):
 
 @pytest.fixture
 def run_analyzer(sandbox):
-    """Run analyze_turn.py against a fixture transcript; returns its decision."""
-    def _run(rows, sid, extra=None):
+    """Run analyze_turn.py against a fixture transcript; returns its decision.
+
+    Defaults to foreground mode so these tests exercise the nudge contract
+    directly. Background mode is covered by its own tests, which pass
+    `env={"SIS_REVIEW_MODE": "background"}` explicitly.
+    """
+    def _run(rows, sid, extra=None, env=None):
         tp = sandbox.home / "{0}.jsonl".format(sid)
         tp.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
         payload = {"transcript_path": str(tp), "session_id": sid}
         payload.update(extra or {})
-        return json.loads(_run_script(sandbox.home, "analyze_turn.py", payload))
+        run_env = {"SIS_REVIEW_MODE": "foreground"}
+        run_env.update(env or {})
+        return json.loads(
+            _run_script(sandbox.home, "analyze_turn.py", payload, run_env))
     return _run
 
 

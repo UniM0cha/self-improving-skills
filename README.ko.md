@@ -4,7 +4,7 @@
 
 > **Claude Code · Claude Cowork · Codex · ChatGPT work를 위한 Hermes Agent식 자기개선 루프.**
 >
-> 어렵게 얻은 작업 노하우를 재사용 가능한 `SKILL.md`로 증류하고, 스킬 편집을 검증하며, 낡은 지식을 정리하고, (v0.9.0부터) 팀이 학습 스킬을 git repo로 공유합니다 — 누구의 개인 커스터마이즈도 절대 덮어쓰지 않으면서.
+> 어렵게 얻은 작업 노하우를 재사용 가능한 `SKILL.md`로 증류하고, 스킬 편집을 검증하며, 낡은 지식을 정리합니다. (v0.13.0부터) 증류는 **detached 백그라운드 워커**에서 돕니다 — 보이는 턴은 평소처럼 끝나고, 헤드리스 세션이 기법을 캡처합니다.
 
 Claude Code에는 이미 훅·서브에이전트·슬래시 커맨드·스킬이 있습니다. 이 플러그인은 그 프리미티브들을 [Nous Research Hermes Agent](https://github.com/NousResearch/hermes-agent)에서 영감을 받은 닫힌 학습 루프로 엮습니다:
 
@@ -36,44 +36,32 @@ Hermes Agent는 스킬과 큐레이터 루프로 절차적 기억을 1급 시민
 - 전용 서브에이전트가 `~/.claude/skills/<name>/SKILL.md`를 **작성/패치**
 - 잘못된 스킬 편집을 자동 **검증·롤백**
 - **사용량 추적**으로 안 쓰는 생성 스킬이 무한히 쌓이는 대신 아카이브되게
-- 검증된 스킬을 팀과 **공유** — opt-in, 리뷰 게이트, 개인화 항상 우선
+- 기본은 **백그라운드 증류** — 큐에 잡을 넣고 detached `claude -p` 세션이 처리, 실패 시 자동으로 in-turn nudge 폴백
 
 ## 기능
 
-- **자동 증류 nudge**: 마지막 증류 이후 도구 호출·파일 편집이 충분히 쌓이면 `Stop` 훅이 **작업 구간당 한 번만** 종료를 막고 증류를 권유합니다. 거절한 nudge는 거절로 남고, *새* 작업이 임계만큼 다시 쌓여야 재발화합니다. nudge에는 transcript 경로가 포함되어 백그라운드 distiller가 실제 작업 내용을 직접 읽을 수 있습니다.
-- **전용 distiller 서브에이전트**: 기존 스킬 패치 > umbrella 스킬 확장 > 참조 파일 추가 순으로 우선하고, 새 class-level 스킬 생성은 최후의 수단입니다. description은 Anthropic skill-creator 가이드(3인칭 상황 매칭 + 구체적 트리거 문구)를 따릅니다.
+- **백그라운드 증류 (v0.13.0, 기본)**: 도구 호출·파일 편집이 충분히 쌓이면 `Stop` 훅이 조용히 잡을 큐(SQLite)에 넣고, **detached 워커**가 담장 친 헤드리스 `claude -p` 세션을 띄워 transcript를 읽고 스킬을 씁니다 — 보이는 턴에는 출력이 전혀 추가되지 않습니다. CLI가 없거나 구버전이거나 로그아웃 상태면 자동으로 기존 in-turn nudge로 폴백하며, nudge는 **작업 구간당 한 번만** 종료를 막고 transcript 경로를 포함합니다.
+- **담장 친 증류 세션**: 백그라운드 자식은 축소된 도구 셋(Bash 없음), `bypassPermissions`에서도 살아있는 deny 규칙, 잡당 예산 상한으로 돌고, 실행 후 **skill guard**가 실행 전 `~/.claude/skills` 스냅샷과 대조해 손댄 SKILL.md를 전부 검증하고 깨졌거나 범위 밖인 것은 롤백합니다. 증류는 새 스킬 생성보다 기존 스킬 패치를 우선합니다(Anthropic skill-creator 가이드).
 - **스킬 편집 안전장치**: 편집 직전 백업, 편집 후 검증, provenance 스탬프, 깨진 `SKILL.md` 자동 롤백. 비차단 품질 조언(예: 매 세션 컨텍스트 비용이 되는 과도하게 긴 description)도 제공합니다.
-- **정확한 사용량 텔레메트리**: `~/.claude/self-improve/skill_usage.json`에 스킬별 use/view/patch 집계. patch 집계는 `PostToolUse` 훅에서 수행되어 *백그라운드* 서브에이전트의 편집까지 포착하고, 큐레이션 중의 일괄 Read는 스킬의 idle 시계를 리셋하지 않습니다.
+- **정확한 사용량 텔레메트리**: `~/.claude/self-improve/skill_usage.json`에 스킬별 use/view/patch 집계. patch 집계는 `PostToolUse` 훅에서 수행되어 *백그라운드* 세션의 편집까지 포착하고, 큐레이션 중의 일괄 Read는 스킬의 idle 시계를 리셋하지 않습니다.
 - **큐레이터 루프**: 안 쓰는 에이전트 생성 스킬은 30일 후 stale, 90일 후 (복구 가능하게) 아카이브됩니다. 반복 사용이 입증된 스킬(`use_count >= 3`)은 절반 속도로 늙습니다. LLM 큐레이션 패스(`/curate-skills`)는 Hermes 큐레이터 프롬프트를 본뜬 umbrella-building 통합으로, 계획을 먼저 제시하고 승인 후에만 적용합니다.
-- **팀 스킬 공유 (v0.9.0)**: **origin-hash 동기화**로 팀 git repo를 통해 학습 스킬을 공유 — 아래 참조.
-- **수동 커맨드**: `/distill-skill`, `/curate-skills`, `/curator-status`, `/prune-skills`, `/archive-skill`, `/pin-skill`, `/restore-skill`, `/share-skill`, `/sync-team-skills`, `/propose-plugin-improvement`.
+- **수동 커맨드**: `/distill-skill`, `/distill-status`, `/curate-skills`, `/curator-status`, `/curator-rollback`, `/prune-skills`, `/archive-skill`, `/pin-skill`, `/restore-skill`, `/migration`, `/propose-plugin-improvement`.
 - **fail-safe 훅**: 훅 에러는 세션을 깨뜨리는 대신 원래 동작을 승인합니다.
+- **크로스 플랫폼**: macOS·Linux·Windows(Git Bash)를 3-OS CI 매트릭스로 검증 — 비한국어 Windows 로케일의 UTF-8 출력까지 포함.
 
-## 팀 스킬 공유
+## 백그라운드 증류 설정
 
-플러그인을 팀의 (대개 private) 스킬 repo로 향하게 하세요 — 하드코딩된 repo는 없습니다:
+백그라운드 모드에는 헤드리스로 인증 가능한 `claude` CLI(>= 2.1.205)가 필요합니다. 구독을 쓴다면 장기 토큰을 한 번 발급해 워커가 읽는 위치에 두세요:
 
-```jsonc
-// ~/.claude/self-improve/team_config.json
-{
-  "repo": "your-org/your-team-skills",
-  "subdir": "skills"
-}
+```bash
+claude setup-token
+install -m 600 /dev/null ~/.claude/self-improve/worker.env
+# 그 파일에 한 줄:  CLAUDE_CODE_OAUTH_TOKEN=<토큰>
 ```
 
-- **보내기** `/share-skill <name>`: 스킬을 스캔(시크릿·로컬 경로·인젝션 패턴)하고, 일반화(기법은 남기고 개인 스타일은 제거)한 뒤, diff를 보여주고 확인을 받아 팀 repo에 PR을 엽니다. 머지는 사람이 합니다.
-- **받기** `/sync-team-skills`: 매번 fresh shallow clone → read-only 계획 확인 → 스킬 단위 트랜잭션 적용.
+환경변수의 API 키(`ANTHROPIC_API_KEY`)도 동작합니다. 인증이 안 되어도 플러그인은 계속 동작합니다 — in-turn nudge로 폴백할 뿐입니다. `/distill-status`가 큐·최근 잡·차단 사유별 해결책을 보여줍니다.
 
-**origin-hash 규칙**이 공유를 구조적으로 안전하게 만듭니다. 설치되는 팀 스킬마다 설치 시점의 결정적 내용 해시를 기록해 두고:
-
-| 내 로컬 사본 상태 | 동기화 동작 |
-|---|---|
-| 손대지 않음 (해시 == origin) | 팀 최신으로 자동 업데이트 |
-| **내가 수정함** | **절대 덮어쓰지 않음** — "diverged" 1회 안내; 원하면 내 버전을 역으로 공유 |
-| 내가 삭제/아카이브함 | 재설치하지 않음 (`--reinstall <name>` 전까지) |
-| 동명의 개인 스킬과 충돌 | 경고와 함께 스킵 |
-
-스킬은 *에이전트에 대한 지시문* — 즉 프롬프트 인젝션 벡터입니다. 그래서 팀 콘텐츠의 모든 쓰기(최초 설치 **그리고** 이후 업데이트)가 정적 스캐너(시크릿·파괴적 명령·인젝션 마커·심볼릭 링크·숨김 파일·크기 상한)를 통과해야 하며, 차단된 콘텐츠는 `~/.claude/skills`가 아니라 격리 디렉토리에 들어갑니다. 팀 스킬은 `created_by: team`으로 표시되어 개인 큐레이터가 절대 건드리지 않습니다 — 소유자는 팀 repo입니다.
+자식 세션은 `bypassPermissions`로 `~/.claude/skills`에 직접 쓰므로, 플러그인은 그것을 신뢰하는 대신 방어를 겹칩니다: Bash 제거, 자격증명·persistence 경로에 대한 deny 규칙(bypass 모드에서도 deny는 적용됨), 잡당 예산 상한, 신뢰할 수 없는 transcript를 감싸는 추측 불가능한 증거 경계, 그리고 검증 실패분을 되돌리는 실행 후 skill guard. deny 목록은 블랙리스트이지 증명이 아닙니다 — 전체 보안 모델은 플러그인 README에 정직하게 문서화되어 있습니다.
 
 ## 설치
 
@@ -114,14 +102,18 @@ codex plugin add chatgpt-codex-self-improving-skills@self-improving-skills
 
 | 변수 | 기본값 | 의미 |
 |---|---:|---|
-| `SIS_DISTILL_THRESHOLD` | `12` | nudge가 발화할 수 있는, 마지막 증류 이후 누적 도구 호출 수 |
+| `SIS_REVIEW_MODE` | `background` | `background`(detached 워커, 내 턴 출력 0) / `foreground`(기존 nudge) / `off`. background는 CLI를 못 쓰면 자동으로 foreground 폴백 |
+| `SIS_CLAUDE_BIN` | 자동탐색 | `claude` 절대경로 — GUI가 띄운 훅은 PATH에 `~/.local/bin`이 없을 수 있음 |
+| `SIS_DISTILL_MAX_USD` | `0.50` | 증류 잡 1건의 `--max-budget-usd` 상한 |
+| `SIS_DISTILL_MAX_JOBS_PER_DAY` | `12` | 하루에 띄울 백그라운드 증류 세션 수 상한 |
+| `SIS_DISTILL_THRESHOLD` | `12` | 증류가 발화할 수 있는, 마지막 증류 이후 누적 도구 호출 수 |
 | `SIS_MIN_FILE_EDITS` | `2` | 마지막 증류 이후 최소 파일 편집 수 — 순수 리서치 대화의 발화를 방지 |
+| `SIS_DISTILL_READONLY_THRESHOLD` | `24` | 편집 0회 구간도 도구 호출이 이 수를 넘으면 증류 (긴 조사·디버깅의 진단 기법 캡처) |
+| `SIS_STATE_DIR` | `~/.claude/self-improve` | 큐·백업·텔레메트리를 전부 함께 옮김 |
 | `SIS_CURATE_MIN_SKILLS` | `8` | 자동 큐레이션이 도는 최소 학습 스킬 수 |
 | `SIS_CURATE_INTERVAL_DAYS` | `7` | 자동 큐레이터 주기 |
 | `SIS_STALE_AFTER_DAYS` | `30` | 이 일수 미사용 시 에이전트 생성 스킬을 stale로 마킹 |
 | `SIS_ARCHIVE_AFTER_DAYS` | `90` | 이 일수 미사용 시 `.archive/`로 이동 (`use_count >= 3`인 스킬은 2배) |
-| `SIS_TEAM_SKILLS_REPO` | (없음) | 팀 repo override (`owner/name`); 기본 소스는 `~/.claude/self-improve/team_config.json` |
-| `SIS_TEAM_SYNC_REMIND_DAYS` | `7` | 마지막 팀 동기화 후 이 일수가 지나면 SessionStart가 `/sync-team-skills`를 권유 (네트워크 0, 1일 1회) |
 | `SIS_PLUGIN_PR` | (없음) | `1`로 설정하면 이 플러그인 자체 소스에 대한 opt-in upstream PR 헬퍼 허용 |
 
 ## 동작 방식
@@ -131,15 +123,21 @@ Claude Code 세션 종료 시도
   ↓
 Stop 훅이 transcript와 usage offset을 파싱
   ↓
-작업이 복잡했는데 아직 증류 안 됐으면 1회성 block 반환
+작업이 복잡했는데 아직 증류 안 됐으면 잡을 큐(SQLite)에 넣고
+approve 반환 — 내 턴은 아무 출력 없이 끝남
   ↓
-Claude가 claude-code-self-improving-skills:skill-distiller에 위임 (백그라운드)
+detached 워커가 잡을 집음 (PID-identity lease, 재시도, backoff)
   ↓
-distiller가 ~/.claude/skills 아래 재사용 가능한 SKILL.md를 패치/생성
+담장 친 헤드리스 `claude -p` 세션 실행: 축소된 도구, deny 규칙,
+예산 상한, transcript는 untrusted-evidence 경계로 감쌈
   ↓
-검증 훅이 frontmatter/크기/provenance를 확인하고 잘못된 편집은 롤백
+세션이 ~/.claude/skills 아래 재사용 가능한 SKILL.md를 패치/생성
+  ↓
+skill guard가 실행 전 스냅샷과 diff — 손댄 SKILL.md를 전부 검증하고
+깨졌거나 범위 밖인 변경은 롤백
   ↓
 다음 세션: Claude Code가 스킬을 정상적으로 발견
+(폴백: 쓸 수 있는 CLI가 없으면 Stop 훅이 기존 nudge로 1회 block)
 ```
 
 학습된 스킬은 플러그인 안이 아니라 사용자 디렉토리에 삽니다. 플러그인을 업데이트해도 누적된 절차적 지식은 지워지지 않습니다.
@@ -156,8 +154,8 @@ plugins/claude-code-self-improving-skills/
   .claude-plugin/plugin.json             # 플러그인 메타데이터
   hooks/                                 # Stop, SessionStart, PreToolUse, PostToolUse 래퍼
   scripts/                               # transcript 분석, 텔레메트리, 큐레이터, 검증기,
-                                         #   팀 동기화 엔진, 보안 스캐너, PR plumbing
-  agents/skill-distiller.md              # 스킬 증류 서브에이전트 프롬프트
+                                         #   증류 큐, detached 워커, skill guard
+  agents/skill-distiller.md              # foreground 폴백용 서브에이전트 프롬프트
   commands/                              # 플러그인이 노출하는 슬래시 커맨드
   tests/                                 # pytest 스위트 (uv run --with pytest -- pytest tests/)
   README.md                              # 상세 설계 노트 (한국어)
@@ -165,10 +163,11 @@ plugins/claude-code-self-improving-skills/
 
 ## 정직한 한계
 
-- Claude Code에는 Hermes Agent의 무료 백그라운드 데몬 스레드가 없습니다. 증류는 보이는/과금되는 서브에이전트 턴을 사용합니다.
+- 백그라운드 증류는 보이지 않을 뿐 무료가 아닙니다: detached `claude -p` 세션이 구독 또는 API 사용량을 소비합니다 (잡당 `SIS_DISTILL_MAX_USD`, 하루 `SIS_DISTILL_MAX_JOBS_PER_DAY`로 상한).
+- 백그라운드 자식은 `bypassPermissions`로 `~/.claude/skills`에 씁니다. deny 규칙·축소된 도구 셋·실행 후 skill guard가 실질적 방어를 겹치지만, deny 목록은 블랙리스트입니다 — 무엇을 보장하고 무엇을 보장하지 않는지는 플러그인 README에 정확히 문서화되어 있습니다.
+- 증거는 세션 transcript이며 이는 신뢰할 수 없는 입력입니다. 추측 불가능한 경계로 감싸고 "지시가 아니라 데이터"로 프레이밍하는 것은 프롬프트 인젝션 위험을 낮출 뿐, 없애지는 못합니다.
 - 이 플러그인은 절차적 기억(`SKILL.md`)을 다룹니다. 사실 기억(당신·프로젝트에 대한 정보)은 Claude Code 네이티브 메모리나 별도 메모리 플러그인의 몫입니다.
 - 큐레이터는 의도적으로 보수적입니다: 에이전트가 생성한 학습 스킬만 아카이브하고, 복구 가능한 백업을 유지합니다.
-- 팀 동기화는 의도적으로 실시간이 아니라 PR 게이트입니다. 실시간 공유 저장소는 한 명의 오염된 세션이 전 팀원의 에이전트에 지시를 주입하는 통로가 됩니다 — 사람의 리뷰 게이트가 **곧** 보안 경계입니다.
 
 ## 라이선스
 

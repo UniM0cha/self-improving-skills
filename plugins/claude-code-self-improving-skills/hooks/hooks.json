@@ -1,5 +1,5 @@
 {
-  "description": "자기개선 루프: 복잡한 구간 종료 시 스킬 증류 유도(Stop) + 세션 시작 안내·큐레이터 알림(SessionStart) + 학습 스킬 검증(PostToolUse)",
+  "description": "자기개선 루프: 복잡한 구간 종료 시 백그라운드 증류 큐잉(Stop) + 세션 시작 안내·큐 상태·큐레이터 알림(SessionStart) + 학습 스킬 백업/검증(Pre·PostToolUse)",
   "hooks": {
     "Stop": [
       {
@@ -15,12 +15,12 @@
     ],
     "SessionStart": [
       {
-        "matcher": "*",
+        "matcher": "startup|resume",
         "hooks": [
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/session-init.sh",
-            "timeout": 10
+            "timeout": 60
           }
         ]
       }

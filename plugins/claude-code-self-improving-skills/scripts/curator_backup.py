@@ -26,6 +26,11 @@ import sys
 import tarfile
 from datetime import datetime, timezone
 
+import sis_io
+
+# Pin UTF-8 before this tool's (Korean-bearing) JSON is printed; see sis_io.
+sis_io.pin_utf8_stdio()
+
 SKILLS_DIR = os.path.expanduser("~/.claude/skills")
 STATE_DIR = os.path.expanduser("~/.claude/self-improve")
 BACKUP_DIR = os.path.join(STATE_DIR, "curator_backups")

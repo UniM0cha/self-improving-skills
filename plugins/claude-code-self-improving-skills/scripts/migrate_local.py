@@ -42,10 +42,15 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import sis_io
+
 try:
     import tomllib  # Python 3.11+ — codex config 충돌 판정·치환 결과 검증용
 except ModuleNotFoundError:
     tomllib = None  # 3.10 이하 — codex config 마이그레이션은 경고 후 건너뜀
+
+# Pin UTF-8 before this migrator's Korean report is printed; see sis_io.
+sis_io.pin_utf8_stdio()
 
 # ---------------------------------------------------------------------------
 # Rename map — 향후 리네임이 또 생기면 여기에만 추가한다.

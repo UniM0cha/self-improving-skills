@@ -28,12 +28,17 @@ import shutil
 import sys
 from datetime import datetime, timedelta, timezone
 
+import sis_io
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import usage_store  # noqa: E402
 try:
     import curator_backup
 except Exception:
     curator_backup = None
+
+# Pin UTF-8 before this tool's (Korean-bearing) JSON is printed; see sis_io.
+sis_io.pin_utf8_stdio()
 
 SKILLS_DIR = os.path.expanduser("~/.claude/skills")
 ARCHIVE_DIR = os.path.join(SKILLS_DIR, ".archive")

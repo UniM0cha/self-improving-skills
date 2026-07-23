@@ -40,13 +40,20 @@ import json
 import os
 import re
 import sys
+import time
 from typing import NoReturn
+
+import sis_io
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     import usage_store
 except Exception:
     usage_store = None  # telemetry is best-effort; nudge logic works without it
+
+# Pin UTF-8 before any decision is written; a swallowed UnicodeEncodeError on
+# the Korean nudge would otherwise degrade this hook to a silent approve.
+sis_io.pin_utf8_stdio()
 
 SKILL_MARKER = "skill-distiller"
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
@@ -197,8 +204,15 @@ def _capture_telemetry(rows, session_id):
         offset = usage_store.get_offset(session_id)
     except Exception:
         offset = 0
-    if offset < 0 or offset > len(rows):
+    if offset < 0:
         offset = 0
+    elif offset > len(rows):
+        # The transcript reads SHORTER than the mark we already recorded — it
+        # is written asynchronously, so this is a stale read, not a rewind.
+        # Rescanning from zero would re-count every event up to the mark as if
+        # it were new, inflating usage counters and resetting the curator's
+        # idle clocks. Skip this pass; the next one sees the full file.
+        return
 
     events = []
     if learned:
@@ -245,7 +259,142 @@ def _capture_telemetry(rows, session_id):
         pass
 
 
+def resolve_review_mode():
+    """background (default) | foreground | off."""
+    mode = (os.environ.get("SIS_REVIEW_MODE") or "").strip().lower()
+    return mode if mode in ("background", "foreground", "off") else "background"
+
+
+PREFLIGHT_TTL_SECONDS = 3600
+
+
+def _background_usable(distill_worker):
+    """Whether a queued job could actually run — checked BEFORE queueing.
+
+    Queueing on a machine where the CLI is missing, unauthenticated, or too old
+    means the turn ends silently and the failure only surfaces later, in a
+    blocked job nobody is looking at. The README promises a foreground nudge
+    instead, so the decision has to be made here.
+
+    The verdict is cached: `claude --version` plus `auth status` is two
+    subprocesses, and this runs on a Stop hook.
+    """
+    claude_bin = distill_worker.discover_claude()
+    if not claude_bin:
+        return False
+
+    cache_path = os.path.join(distill_worker.state_dir(), "preflight.json")
+    now = time.time()
+    try:
+        with open(cache_path, encoding="utf-8") as fh:
+            cached = json.load(fh)
+        if (
+            cached.get("bin") == claude_bin
+            and now - float(cached.get("at") or 0) < PREFLIGHT_TTL_SECONDS
+        ):
+            return bool(cached.get("ok"))
+    except Exception:
+        pass
+
+    try:
+        env = distill_worker.child_environment()
+        # hooks.json gives this hook 15 seconds in total. _run_cli defaults to
+        # 30 per command, so a stalled CLI would have Claude kill the hook
+        # before it could fall back to the foreground nudge.
+        original = distill_worker._run_cli
+
+        def _bounded(command, env, timeout=5):
+            return original(command, env, timeout=min(timeout, 5))
+
+        distill_worker._run_cli = _bounded
+        try:
+            blocked, _version = distill_worker._preflight(claude_bin, env)
+        finally:
+            distill_worker._run_cli = original
+        ok = blocked is None
+    except Exception:
+        ok = False
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as fh:
+            json.dump({"bin": claude_bin, "at": now, "ok": ok}, fh)
+    except Exception:
+        pass
+    return ok
+
+
+def _enqueue_background(payload, session_id, transcript_path, rows,
+                        nudge_fires, readonly_fires, core_fires):
+    """Queue a detached distillation. False means "fall back to the nudge".
+
+    Every failure path here is a fall-through rather than an error: a broken
+    queue must degrade to the old in-session behaviour, never leave the user
+    with no distillation at all.
+    """
+    try:
+        import distill_queue
+        import distill_worker
+    except Exception:
+        return False
+
+    # A day's worth of background sessions is real money, and the triggers were
+    # tuned for a nudge that costs nothing to ignore.
+    cap = _int_env("SIS_DISTILL_MAX_JOBS_PER_DAY", 12)
+    try:
+        queue = distill_queue.DistillQueue()
+        if cap > 0 and queue.count_created_since(time.time() - 86400) >= cap:
+            return False
+    except Exception:
+        return False
+
+    if not _background_usable(distill_worker):
+        return False
+
+    if nudge_fires or readonly_fires:
+        trigger = "signal" if nudge_fires else "readonly"
+    else:
+        trigger = "core_touch"
+    try:
+        queued = queue.enqueue(
+            session_id=session_id,
+            # Claude Code's Stop payload has no turn id; prompt_id (v2.1.196+)
+            # is the stable per-prompt identifier that dedupes repeat Stops.
+            prompt_id=str(payload.get("prompt_id") or ""),
+            transcript_path=transcript_path,
+            transcript_rows=rows,
+            signal=bool(nudge_fires or readonly_fires),
+            signal_source="stop_hook",
+            trigger=trigger,
+            # The transcript is written asynchronously and may not yet hold
+            # this turn's final message; the payload always does.
+            last_assistant_message=str(payload.get("last_assistant_message") or ""),
+            cwd=str(payload.get("cwd") or ""),
+        )
+    except Exception:
+        return False
+    if not queued.get("job_id"):
+        return False
+    try:
+        distill_worker.launch_detached()
+    except Exception:
+        # The job is durable; the next SessionStart relaunches the worker.
+        pass
+    return True
+
+
 def main():
+    # Cross-process recursion guard. The background worker runs a full Claude
+    # Code session, so THIS hook fires inside it too — and it would enqueue
+    # another job, which would spawn another worker, forever. `stop_hook_active`
+    # cannot help: it marks a continuation within one session, and the worker's
+    # child is a separate process where it arrives false. `CLAUDE_CODE_CHILD_SESSION`
+    # cannot either: Claude Code sets it to 1 in every normal hook process, so
+    # keying on it would disable the hook everywhere. Hence our own marker.
+    # It is checked before ANY state is touched, so a background session also
+    # cannot consume the session-map slots the foreground session needs.
+    if os.environ.get("SIS_BACKGROUND_JOB") == "1":
+        approve()
+
     raw = sys.stdin.read()
     try:
         payload = json.loads(raw) if raw.strip() else {}
@@ -361,6 +510,34 @@ def main():
     nudge_fires = total_calls >= threshold and file_edits >= min_edits
     readonly_fires = (file_edits == 0
                       and total_calls >= _int_env("SIS_DISTILL_READONLY_THRESHOLD", 24))
+    # core_touched has no threshold of its own: a one-line edit to the plugin
+    # source trips it. That is fine for an advisory the agent reads, but as a
+    # background trigger it would spawn a session on every single turn spent
+    # working in this repository.
+    core_fires = core_touched and total_calls >= _int_env("SIS_CORE_TOUCH_MIN_CALLS", 6)
+
+    mode = resolve_review_mode()
+    if mode == "off":
+        approve()
+
+    if mode == "background":
+        if not (nudge_fires or readonly_fires or core_fires):
+            # In particular a lone one-line core edit: it trips core_touched
+            # with no threshold of its own, and blocking the turn for that
+            # would break the silence background mode exists to provide.
+            approve()
+        queued = _enqueue_background(payload, session_id, path, len(rows),
+                                     nudge_fires, readonly_fires, core_fires)
+        if queued:
+            if usage_store is not None:
+                try:
+                    usage_store.record_nudge(session_id, len(rows))
+                except Exception:
+                    pass
+            approve()
+        # Queue or CLI unavailable: fall through to the foreground nudge so
+        # the loop degrades instead of silently doing nothing.
+
     if nudge_fires or readonly_fires or core_touched:
         parts = []
         if nudge_fires or readonly_fires:

@@ -8,6 +8,8 @@ import sys
 
 import pytest
 
+from conftest import _sandbox_home_env
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 이하 — codex config 마이그레이션은 skip 대상
@@ -22,7 +24,11 @@ import migrate_local
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    # migrate_local resolves everything through Path.home(), which on Windows
+    # reads USERPROFILE (not HOME) — a HOME-only sandbox would leak onto the
+    # real profile and every migration would silently no-op there.
+    for key, value in _sandbox_home_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
     return tmp_path
 
 

@@ -32,13 +32,17 @@ import shutil
 import sys
 from typing import NoReturn
 
+import sis_io
+from skill_paths import backup_path, is_learned_skill, skill_name
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     import usage_store
 except Exception:
     usage_store = None
 
-BACKUP_DIR = os.path.expanduser("~/.claude/self-improve/skill_backups")
+# Pin UTF-8 before the (Korean) validation message is written; see sis_io.
+sis_io.pin_utf8_stdio()
 
 MAX_NAME = 64
 MAX_DESCRIPTION = 1024
@@ -67,22 +71,11 @@ def feedback(text) -> NoReturn:
     sys.exit(0)
 
 
-def _is_learned_skill(file_path):
-    norm = str(file_path or "").replace("\\", "/")
-    return "/.claude/skills/" in norm and norm.endswith("SKILL.md")
-
-
-def _backup_path(file_path):
-    norm = str(file_path).replace("\\", "/")
-    name = os.path.basename(os.path.dirname(norm))
-    return os.path.join(BACKUP_DIR, name + ".bak")
-
-
 def _rollback_if_possible(file_path):
     """Restore the pre-edit backup (made by backup_skill.py at PreToolUse).
     Returns True if a rollback happened (existing skill whose edit broke it),
     False if there was nothing to roll back to (a brand-new file)."""
-    bp = _backup_path(file_path)
+    bp = backup_path(file_path)
     if not os.path.isfile(bp):
         return False
     try:
@@ -167,7 +160,7 @@ def _advisory(text, file_path=None):
     # name ≠ dir mismatch: usage telemetry keys on the DIR name, so a mismatch
     # silently splits a skill's records. Advisory only (never blocking, so a
     # pre-existing mismatched skill can't fall into an edit→rollback loop).
-    dirname = os.path.basename(os.path.dirname(str(file_path or "").replace("\\", "/")))
+    dirname = skill_name(file_path)
     if name and dirname and name != dirname:
         notes.append("frontmatter name('{0}')과 디렉토리명('{1}')이 다릅니다. usage 텔레메트리는 "
                      "디렉토리명으로 집계되므로 어긋납니다 — 디렉토리명 또는 name 을 "
@@ -199,8 +192,7 @@ def _pinned_guard(file_path, payload, current_text):
     agent_type = str(payload.get("agent_type") or "")
     if "skill-distiller" not in agent_type:
         return None
-    norm = str(file_path).replace("\\", "/")
-    name = os.path.basename(os.path.dirname(norm))
+    name = skill_name(file_path)
     pinned = False
     if usage_store is not None:
         try:
@@ -208,7 +200,7 @@ def _pinned_guard(file_path, payload, current_text):
         except Exception:
             pinned = False
     if not pinned:
-        bp = _backup_path(file_path)
+        bp = backup_path(file_path)
         try:
             if os.path.isfile(bp):
                 with open(bp, encoding="utf-8", errors="ignore") as fh:
@@ -265,8 +257,7 @@ def _record_patch(file_path, text, payload):
     explicit `origin: distilled` marker in the written text, else "user"."""
     if usage_store is None:
         return
-    norm = str(file_path).replace("\\", "/")
-    name = os.path.basename(os.path.dirname(norm))
+    name = skill_name(file_path)
     if not name:
         return
     agent_type = str(payload.get("agent_type") or "")
@@ -290,7 +281,7 @@ def main():
     raw_input = payload.get("tool_input")
     tool_input = raw_input if isinstance(raw_input, dict) else {}
     file_path = tool_input.get("file_path", "")
-    if not _is_learned_skill(file_path) or not os.path.isfile(file_path):
+    if not is_learned_skill(file_path) or not os.path.isfile(file_path):
         silent()
 
     try:

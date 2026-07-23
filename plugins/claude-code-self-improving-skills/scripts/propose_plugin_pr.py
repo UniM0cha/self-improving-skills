@@ -20,8 +20,13 @@ import re
 import sys
 from typing import NoReturn
 
+import sis_io
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import propose_pr  # noqa: E402
+
+# Pin UTF-8 before this tool's (Korean-bearing) output is printed; see sis_io.
+sis_io.pin_utf8_stdio()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_JSON = os.path.normpath(os.path.join(HERE, "..", ".claude-plugin", "plugin.json"))

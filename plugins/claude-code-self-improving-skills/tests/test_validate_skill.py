@@ -1,12 +1,12 @@
 """PostToolUse hook-contract tests for validate_skill.py (real subprocess)."""
 
 import json
-import shutil
 import subprocess
 import sys
 import os
 
-from conftest import SCRIPTS_DIR
+from conftest import SCRIPTS_DIR, _run_script
+from skill_paths import backup_path
 
 
 def _payload(path, agent_type=None):
@@ -17,10 +17,28 @@ def _payload(path, agent_type=None):
 
 
 def _backup(sandbox, name):
-    """Simulate the PreToolUse backup the real hook pair would have made."""
-    bdir = sandbox.home / ".claude" / "self-improve" / "skill_backups"
-    bdir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(sandbox.skills / name / "SKILL.md"), str(bdir / (name + ".bak")))
+    """Take the pre-edit backup by running the REAL PreToolUse hook.
+
+    Hand-rolling the backup filename here would let the two halves of the
+    backup/rollback pair drift apart without any test noticing — which is the
+    exact failure this pairing exists to prevent.
+    """
+    _run_script(sandbox.home, "backup_skill.py",
+                _payload(sandbox.skills / name / "SKILL.md"))
+
+
+def test_backup_survives_a_non_ascii_path_under_a_legacy_codepage(sandbox):
+    """The PreToolUse backup must handle a non-ASCII payload path. On a
+    non-Korean Windows the hook reads its stdin under cp1252, where a Korean
+    path crashes the decode (the byte 0x9D in '망' is undefined there) — and the
+    hook would then exit WITHOUT taking the pre-edit backup, leaving the
+    PostToolUse validator with nothing to roll a broken edit back to."""
+    d = sandbox.make_skill("망각-노트")
+    backup = backup_path(str(d / "SKILL.md"))
+    assert not os.path.exists(backup)
+    _run_script(sandbox.home, "backup_skill.py", _payload(d / "SKILL.md"),
+                extra_env={"PYTHONIOENCODING": "cp1252"})
+    assert os.path.exists(backup), "backup missing — stdin decode likely crashed"
 
 
 def test_valid_skill_is_silent_and_counts_patch(run_validator, sandbox, store_data):

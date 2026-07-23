@@ -4,7 +4,7 @@
 
 > **Hermes Agent-style self-improvement for Claude Code, Claude Cowork, Codex, and ChatGPT work.**
 >
-> It turns hard-won workflow lessons into reusable `SKILL.md` files, validates skill edits, curates stale knowledge, and (since v0.9.0) lets a team share learned skills through a git repo — without ever overwriting anyone's personal customizations.
+> It turns hard-won workflow lessons into reusable `SKILL.md` files, validates skill edits, curates stale knowledge, and (since v0.13.0) distills in a **detached background worker** — your visible turn ends normally while a headless session captures the technique.
 
 Claude Code already has hooks, subagents, slash commands, and skills. This plugin wires those primitives into a closed learning loop inspired by [Nous Research Hermes Agent](https://github.com/NousResearch/hermes-agent):
 
@@ -36,44 +36,32 @@ Hermes Agent has first-class procedural memory through skills and a curator loop
 - **Write or patch** `~/.claude/skills/<name>/SKILL.md` through a dedicated subagent.
 - **Validate and roll back** malformed skill edits automatically.
 - **Track usage** so stale generated skills can be archived instead of piling up forever.
-- **Share** proven skills with your team — opt-in, review-gated, personalization always wins.
+- **Distill in the background** by default — a queued job and a detached `claude -p` session, with an in-turn nudge as the automatic fallback.
 
 ## Features
 
-- **Automatic distillation nudge**: a `Stop` hook blocks **once per segment of work** when enough tool calls and file edits accumulated since the last distillation. A declined nudge stays declined; it only re-fires after another threshold of *new* work. The nudge includes the transcript path so the background distiller can read what actually happened.
-- **Dedicated distiller subagent**: prefers patching existing skills, then umbrella skills, then adding reference files, and creates a new class-level skill only as a last resort. Skill descriptions follow Anthropic's skill-creator guidance (third-person situation match with concrete trigger phrases).
+- **Background distillation (v0.13.0, default)**: when enough tool calls and file edits accumulate, the `Stop` hook silently enqueues a job (SQLite queue) and a **detached worker** runs a fenced headless `claude -p` session that reads the transcript and writes the skill — your turn ends with zero extra output. If the CLI is missing, outdated, or signed out, the hook automatically falls back to the classic in-turn nudge, which blocks **once per segment of work** and includes the transcript path.
+- **Fenced distillation session**: the background child runs with a reduced tool set (no Bash), permission deny rules that survive `bypassPermissions`, a per-job budget cap, and a post-run **skill guard** that snapshots `~/.claude/skills` before the run, validates every touched `SKILL.md` after it, and rolls back anything malformed or out of scope. Distillation prefers patching existing skills over creating new ones (Anthropic skill-creator guidance).
 - **Skill edit safety**: pre-edit backups, post-edit validation, provenance stamping, and automatic rollback on malformed `SKILL.md`. Non-blocking quality advisories (e.g. over-long descriptions that cost context in every session).
-- **Accurate usage telemetry**: skill use/view/patch counts in `~/.claude/self-improve/skill_usage.json`. Patch counting runs in the `PostToolUse` hook so edits made by *background* subagents are captured too, and bulk reads during curation never reset a skill's idle clock.
+- **Accurate usage telemetry**: skill use/view/patch counts in `~/.claude/self-improve/skill_usage.json`. Patch counting runs in the `PostToolUse` hook so edits made by *background* sessions are captured too, and bulk reads during curation never reset a skill's idle clock.
 - **Curator loop**: unused agent-created skills go stale after 30 days and are archived (recoverably) after 90. Skills proven by repeated use (`use_count >= 3`) age at half speed. The LLM curation pass (`/curate-skills`) is an umbrella-building consolidation modeled on Hermes' curator prompt — plan first, apply only after approval.
-- **Team skill sharing (v0.9.0)**: share learned skills through a team git repo with **origin-hash sync** — see below.
-- **Manual commands**: `/distill-skill`, `/curate-skills`, `/curator-status`, `/prune-skills`, `/archive-skill`, `/pin-skill`, `/restore-skill`, `/share-skill`, `/sync-team-skills`, `/propose-plugin-improvement`.
+- **Manual commands**: `/distill-skill`, `/distill-status`, `/curate-skills`, `/curator-status`, `/curator-rollback`, `/prune-skills`, `/archive-skill`, `/pin-skill`, `/restore-skill`, `/migration`, `/propose-plugin-improvement`.
 - **Fail-safe hooks**: hook errors approve the original action instead of breaking your Claude Code session.
+- **Cross-platform**: macOS, Linux, and Windows (Git Bash), verified by a 3-OS CI matrix — including UTF-8 output on non-Korean Windows locales.
 
-## Team skill sharing
+## Background distillation setup
 
-Point the plugin at your team's (usually private) skills repo — nothing is hardcoded:
+Background mode needs a `claude` CLI (>= 2.1.205) that can authenticate headlessly. If you use a subscription, generate a long-lived token once and put it where the worker reads it:
 
-```jsonc
-// ~/.claude/self-improve/team_config.json
-{
-  "repo": "your-org/your-team-skills",
-  "subdir": "skills"
-}
+```bash
+claude setup-token
+install -m 600 /dev/null ~/.claude/self-improve/worker.env
+# then put one line in that file:  CLAUDE_CODE_OAUTH_TOKEN=<token>
 ```
 
-- **Publish** with `/share-skill <name>`: the skill is scanned (secrets, local paths, injection patterns), generalized (techniques stay, personal style is stripped), shown to you as a diff, and opened as a PR against the team repo. A human merges.
-- **Receive** with `/sync-team-skills`: a fresh shallow clone, a read-only plan you confirm, then per-skill transactional apply.
+An API key (`ANTHROPIC_API_KEY`) in the environment works too. Without working auth the plugin keeps functioning — it just falls back to the in-turn nudge. `/distill-status` shows the queue, recent jobs, and the exact remedy for anything blocked.
 
-The **origin-hash rule** makes sharing safe by construction. Each installed team skill records a deterministic content hash at install time:
-
-| Your local copy | Sync behavior |
-|---|---|
-| Untouched (hash == origin) | Auto-updated to the team's latest |
-| **Customized by you** | **Never overwritten** — a one-time "diverged" notice; share your version back if you want |
-| Deleted or archived by you | Never re-installed (until `--reinstall <name>`) |
-| Name collides with a personal skill | Skipped with a warning |
-
-Skills are *instructions to an agent* — i.e. a prompt-injection vector — so every write of team content (first install **and** later updates) passes a static scanner (secrets, destructive commands, injection markers, symlinks, hidden files, size caps). Blocked content lands in quarantine, never in `~/.claude/skills`. Team skills are marked `created_by: team` and are never touched by your personal curator: their owner is the team repo.
+The child session writes to `~/.claude/skills` under `bypassPermissions`, so the plugin layers defenses instead of trusting it: no Bash, deny rules on credential and persistence paths (deny rules still apply in bypass mode), a hard budget cap per job, an unguessable evidence boundary around the untrusted transcript, and the post-run skill guard that reverts anything that fails validation. The deny list is a blocklist, not a proof — the plugin README documents the full security model honestly.
 
 ## Install
 
@@ -114,14 +102,18 @@ All configuration is optional. Set these in your shell or in `~/.claude/settings
 
 | Variable | Default | Meaning |
 |---|---:|---|
-| `SIS_DISTILL_THRESHOLD` | `12` | Tool-call count since the last distillation before the nudge can trigger |
+| `SIS_REVIEW_MODE` | `background` | `background` (detached worker, zero output in your turn) / `foreground` (classic nudge) / `off`. Background falls back to foreground automatically when the CLI cannot run |
+| `SIS_CLAUDE_BIN` | auto-detect | Absolute path to `claude`; useful when a GUI-spawned hook lacks `~/.local/bin` on PATH |
+| `SIS_DISTILL_MAX_USD` | `0.50` | `--max-budget-usd` cap per distillation job |
+| `SIS_DISTILL_MAX_JOBS_PER_DAY` | `12` | Daily cap on spawned background distillation sessions |
+| `SIS_DISTILL_THRESHOLD` | `12` | Tool-call count since the last distillation before distillation can trigger |
 | `SIS_MIN_FILE_EDITS` | `2` | Minimum file edits since the last distillation; prevents pure research chats from triggering |
+| `SIS_DISTILL_READONLY_THRESHOLD` | `24` | Edit-free segments still distill past this many tool calls (diagnostic technique from long investigations) |
+| `SIS_STATE_DIR` | `~/.claude/self-improve` | Moves the queue, backups, and telemetry together |
 | `SIS_CURATE_MIN_SKILLS` | `8` | Minimum learned-skill count before automatic curation runs |
 | `SIS_CURATE_INTERVAL_DAYS` | `7` | Automatic curator interval |
 | `SIS_STALE_AFTER_DAYS` | `30` | Mark unused agent-created skills as stale after this many inactive days |
 | `SIS_ARCHIVE_AFTER_DAYS` | `90` | Move unused agent-created skills to `.archive/` after this many inactive days (doubled for skills with `use_count >= 3`) |
-| `SIS_TEAM_SKILLS_REPO` | unset | Team repo override (`owner/name`); the primary source is `~/.claude/self-improve/team_config.json` |
-| `SIS_TEAM_SYNC_REMIND_DAYS` | `7` | Days after the last team sync before SessionStart suggests `/sync-team-skills` (no network, once a day) |
 | `SIS_PLUGIN_PR` | unset | Set to `1` to allow the opt-in upstream PR helper for this plugin's own source |
 
 ## How it works
@@ -131,15 +123,21 @@ Claude Code session ends
   ↓
 Stop hook parses the transcript and usage offsets
   ↓
-If the work was complex and not yet distilled, it returns a one-time block
+If the work was complex and not yet distilled, it enqueues a job (SQLite)
+and returns approve — your turn ends with no extra output
   ↓
-Claude delegates to claude-code-self-improving-skills:skill-distiller (background)
+A detached worker claims the job (PID-identity lease, retries, backoff)
   ↓
-The distiller patches or creates a reusable SKILL.md under ~/.claude/skills
+It runs a fenced headless `claude -p` session: reduced tools, deny rules,
+budget cap, the transcript wrapped in an untrusted-evidence boundary
   ↓
-Validation hooks check frontmatter/size/provenance and roll back bad edits
+The session patches or creates a reusable SKILL.md under ~/.claude/skills
+  ↓
+The skill guard diffs a pre-run snapshot, validates every touched SKILL.md,
+and rolls back anything malformed or out of scope
   ↓
 Next session: Claude Code discovers the skill normally
+(fallback: with no usable CLI the Stop hook blocks once with the classic nudge)
 ```
 
 The learned skills live in your user directory, not inside the plugin. Updating the plugin does not erase your accumulated procedural knowledge.
@@ -156,8 +154,8 @@ plugins/claude-code-self-improving-skills/
   .claude-plugin/plugin.json             # plugin metadata
   hooks/                                 # Stop, SessionStart, PreToolUse, PostToolUse wrappers
   scripts/                               # transcript analysis, telemetry, curator, validator,
-                                         #   team sync engine, security scanner, PR plumbing
-  agents/skill-distiller.md              # subagent prompt for skill distillation
+                                         #   distillation queue, detached worker, skill guard
+  agents/skill-distiller.md              # subagent prompt for the foreground fallback
   commands/                              # slash commands exposed by the plugin
   tests/                                 # pytest suite (uv run --with pytest -- pytest tests/)
   README.md                              # detailed design notes (Korean)
@@ -165,10 +163,11 @@ plugins/claude-code-self-improving-skills/
 
 ## Honest limitations
 
-- Claude Code does not provide Hermes Agent's free background daemon thread. Distillation uses a visible/billable subagent turn.
+- Background distillation is invisible but not free: the detached `claude -p` session consumes your subscription or API usage (bounded by `SIS_DISTILL_MAX_USD` per job and `SIS_DISTILL_MAX_JOBS_PER_DAY`).
+- The background child writes to `~/.claude/skills` under `bypassPermissions`. The deny rules, reduced tool set, and post-run skill guard layer real defenses, but the deny list is a blocklist — the plugin README documents exactly what that does and does not guarantee.
+- The evidence is the session transcript, which is untrusted input. It is fenced with an unguessable boundary and framed as data-not-instructions, which lowers, not eliminates, prompt-injection risk.
 - This plugin handles procedural memory (`SKILL.md`), not factual memory. Claude Code's native memory features or separate memory plugins should handle facts about you or your projects.
 - The curator is intentionally conservative: it archives only agent-created learned skills and keeps recoverable backups.
-- Team sync is PR-gated by design, not real-time. A shared real-time skill store would let one compromised session inject instructions into every teammate's agent; the human review gate **is** the security boundary.
 
 ## License
 
