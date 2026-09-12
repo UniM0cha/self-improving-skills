@@ -107,8 +107,8 @@ codex plugin add chatgpt-codex-self-improving-skills@self-improving-skills
 | `SIS_DISTILL_THRESHOLD` | `40` | 증류가 발화할 수 있는, 마지막 증류 이후 누적 도구 호출 수 (0.18.0 에서 12 → 40: 12 에서는 백그라운드 실행의 92% 가 스킬을 써 라이브러리가 하루 10개씩 늘었음) |
 | `SIS_MIN_FILE_EDITS` | `3` | 마지막 증류 이후 최소 파일 편집 수 — 순수 리서치 대화의 발화를 방지 |
 | `SIS_DISTILL_READONLY_THRESHOLD` | `80` | 편집 0회 구간도 도구 호출이 이 수를 넘으면 증류 (긴 조사·디버깅의 진단 기법 캡처) |
-| `SIS_DISTILLER_MODEL` | (없음) | 증류 자식의 모델 티어(예: `sonnet`). 미설정이면 계정 모델 상속. 지정한 값을 그대로 넘김 |
-| `SIS_CURATE_MODEL` | (없음) | 통합·압축 자식의 모델 티어. 미설정이면 계정 모델 상속 |
+| `SIS_DISTILLER_MODEL` | `opus` | 증류 자식의 모델. **이 플러그인의 자식은 Opus 이하로만 돕니다**(0.18.2): 미설정이면 `opus`, `sonnet` 같은 더 낮은 티어는 그대로, `fable`·`mythos` 는 `opus` 로 내리고 잡 summary 에 기록 |
+| `SIS_CURATE_MODEL` | `opus` | 통합·압축 자식의 모델. 증류와 같은 Opus 이하 규칙 |
 | `SIS_MAX_LEARNED_SKILLS` | `100` | 학습 스킬 상한. 이 수 이상이면 워커가 새 스킬 생성을 금지하고, 그래도 만들어진 것은 가드가 `~/.claude/self-improve/candidates/` 에 보관 (패치는 막지 않음) |
 | `SIS_PROMPT_NEIGHBOURS` | `15` | 증류 프롬프트에 패치 대상으로 싣는, 전사와 가장 겹치는 기존 스킬 수 |
 | `SIS_DUP_NAME_JACCARD` | `0.5` | 새 스킬을 근사 중복으로 거절하는 이름 토큰 겹침 임계 |

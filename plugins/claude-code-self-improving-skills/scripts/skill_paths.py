@@ -80,6 +80,28 @@ def int_env(name, default):
         return default
 
 
+# The model ceiling for every child session and subagent THIS plugin starts:
+# Opus or below. Distilling a 200,000-character transcript on the account's
+# frontier model (Fable at twice the Opus rate) buys nothing a skill needs, so
+# the plugin owner decided the plugin never runs its children above Opus. The
+# default when nothing is asked for is the ceiling itself; a lower tier
+# (sonnet, haiku) passes through unchanged; a higher one is lowered.
+CHILD_MODEL_CEILING = "opus"
+ABOVE_CEILING = ("fable", "mythos")
+
+
+def child_model(requested):
+    """The model a child session actually runs on: `requested` if it names a
+    tier at or below the ceiling, else the ceiling. Empty means the ceiling."""
+    wanted = str(requested or "").strip()
+    if not wanted:
+        return CHILD_MODEL_CEILING
+    lowered = wanted.lower()
+    if any(name in lowered for name in ABOVE_CEILING):
+        return CHILD_MODEL_CEILING
+    return wanted
+
+
 def float_env(name, default):
     """Like int_env, for the similarity thresholds."""
     try:

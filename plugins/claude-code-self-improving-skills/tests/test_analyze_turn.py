@@ -199,6 +199,15 @@ def test_distiller_model_env_included_in_nudge(run_analyzer, monkeypatch):
     assert r["decision"] == "block" and 'model="sonnet"' in r["reason"]
 
 
+def test_the_nudge_names_opus_by_default_and_lowers_fable(run_analyzer, monkeypatch):
+    monkeypatch.delenv("SIS_DISTILLER_MODEL", raising=False)
+    r = run_analyzer(_work_rows(), "m3")
+    assert 'model="opus"' in r["reason"]
+    monkeypatch.setenv("SIS_DISTILLER_MODEL", "fable")
+    r = run_analyzer(_work_rows(), "m4")
+    assert 'model="opus"' in r["reason"] and 'model="fable"' not in r["reason"]
+
+
 def test_seed_labels_user_vs_distilled(run_analyzer, sandbox, store_data):
     sandbox.make_skill("hand-made")
     sandbox.make_skill("auto-made",

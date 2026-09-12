@@ -536,20 +536,34 @@ def test_the_curation_prompt_states_the_size_ceiling(worker, queue, tmp_path):
     assert "90,000" in prompt
 
 
-def test_no_model_is_pinned_when_none_was_asked_for(worker, queue, tmp_path):
-    """`--model sonnet` used to be hardcoded, which silently overrode whatever
-    tier the user had chosen for their own work. Leaving the flag off inherits
-    the account's model instead — measured, a child launched without it runs on
-    `claude-opus-5[1m]` for an account whose current model is Opus 5. Applies to
-    both job kinds; the env overrides below are the way to pin one."""
+def _argv_model(tmp_path):
+    argv = (tmp_path / "argv.txt").read_text(encoding="utf-8").splitlines()
+    return argv[argv.index("--model") + 1]
+
+
+def test_the_child_runs_on_opus_when_no_tier_was_asked_for(worker, queue, tmp_path, monkeypatch):
+    """Without a knob the child would inherit the account's model — Fable, on
+    the owner's account — and read a 200k-character transcript at that rate.
+    The plugin's ceiling is Opus, so the flag is always passed. Both job kinds."""
+    monkeypatch.delenv("SIS_DISTILLER_MODEL", raising=False)
+    monkeypatch.delenv("SIS_CURATE_MODEL", raising=False)
     _enqueue_curate(queue)
     _run(worker, queue, _capturing_claude(tmp_path))
-    assert "--model" not in (tmp_path / "argv.txt").read_text(encoding="utf-8").splitlines()
+    assert _argv_model(tmp_path) == "opus"
 
     transcript = _transcript(tmp_path / "t.jsonl", _chain("user", "assistant"))
     _enqueue(queue, transcript, 2)
     _run(worker, queue, _capturing_claude(tmp_path))
-    assert "--model" not in (tmp_path / "argv.txt").read_text(encoding="utf-8").splitlines()
+    assert _argv_model(tmp_path) == "opus"
+
+
+def test_a_tier_above_the_ceiling_is_lowered_to_opus(worker, queue, tmp_path, monkeypatch):
+    monkeypatch.setenv("SIS_DISTILLER_MODEL", "claude-fable-5-1")
+    transcript = _transcript(tmp_path / "t.jsonl", _chain("user", "assistant"))
+    _enqueue(queue, transcript, 2)
+    _run(worker, queue, _capturing_claude(tmp_path))
+    assert _argv_model(tmp_path) == "opus"
+    assert "above this plugin's ceiling" in queue.list_jobs()[0]["result"]["summary"]
 
 
 def test_an_explicit_distillation_model_override_wins(worker, queue, tmp_path, monkeypatch):

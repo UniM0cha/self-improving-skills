@@ -580,11 +580,14 @@ def main():
             # M1: opt-in cost routing for the distiller subagent. The
             # per-invocation model parameter beats the agent frontmatter, so no
             # file change is needed — default (unset) inherits the main model.
-            model_pref = (os.environ.get("SIS_DISTILLER_MODEL") or "").strip().lower()
-            if model_pref:
-                msg += ("\n\nSIS_DISTILLER_MODEL 이 설정되어 있습니다: 서브에이전트 호출에 "
-                        "model=\"{0}\" 파라미터를 포함하세요(호출 시 지정한 model 이 에이전트 "
-                        "frontmatter 보다 우선합니다).".format(model_pref))
+            # This plugin's children run at Opus or below (skill_paths.child_model):
+            # the nudge always names the model so the subagent never inherits a
+            # frontier tier from the main session.
+            model_pref = skill_paths.child_model(os.environ.get("SIS_DISTILLER_MODEL"))
+            msg += ("\n\n서브에이전트 호출에 model=\"{0}\" 파라미터를 포함하세요(이 플러그인의 "
+                    "증류는 Opus 이하로만 돕니다. SIS_DISTILLER_MODEL 로 더 낮은 티어를 고를 수 "
+                    "있고, 호출 시 지정한 model 이 에이전트 frontmatter 보다 우선합니다)."
+                    .format(model_pref))
             msg += ("\n\n백그라운드 호출이 \"권한 분류기에 의해 차단됨\"으로 막히면 — 그게 auto "
                     "mode 신호입니다. 플러그인 README 의 'auto mode' 섹션(permissions.allow "
                     "5줄)을 참조해 사용자에게 1회 추가를 안내하세요.")

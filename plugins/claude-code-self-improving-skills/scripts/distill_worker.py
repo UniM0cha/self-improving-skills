@@ -509,10 +509,9 @@ def build_claude_command(
         "--json-schema",
         json.dumps(RESULT_SCHEMA, ensure_ascii=False, sort_keys=True),
     ]
-    # Only pin a tier when one was explicitly asked for; otherwise leave the
-    # flag off entirely so the child inherits the account's current model.
-    if model:
-        command += ["--model", model]
+    # Always pinned since 0.18.2: a child inherits the account's model when
+    # the flag is off, and the plugin owner's ceiling is Opus (skill_paths).
+    command += ["--model", skill_paths.child_model(model)]
     return command + [
         "--no-session-persistence",
         "--setting-sources",
@@ -1844,9 +1843,13 @@ def _run_job(
     curating = is_curate_job(job)
     compressing = is_compress_job(job)
     library_pass = curating or compressing
-    # Empty means "don't pass --model", i.e. inherit the account's own model.
     override = os.environ.get("SIS_CURATE_MODEL" if library_pass else "SIS_DISTILLER_MODEL")
-    model = str(job.get("model") or override or "").strip() or None
+    requested = str(job.get("model") or override or "").strip() or None
+    model = skill_paths.child_model(requested)
+    ceiling_note = ""
+    if requested and model != requested:
+        ceiling_note = (" [model '{0}' is above this plugin's ceiling; the child ran on "
+                        "'{1}']".format(requested, model))
 
     if cli_version_used:
         queue.set_cli_version(job_id, owner, cli_version_used)
@@ -2017,6 +2020,8 @@ def _run_job(
 
     skill_guard.stamp_provenance(guard["installed"])
     merged = _merge_guard(structured, guard, _denials(result.stdout))
+    if ceiling_note:
+        merged["summary"] = (str(merged.get("summary") or "") + ceiling_note)[:4000]
 
     updated = queue.complete(job_id, owner, merged)
     _release_baseline(baseline_dir)

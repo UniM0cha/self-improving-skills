@@ -2,7 +2,7 @@
 name: skill-distiller
 description: Distills reusable techniques from a finished work session into a learned skill under ~/.claude/skills — patching an existing skill when one fits, creating a new class-level skill only as a last resort. Invoked after complex tasks (by the Stop hook nudge or the /distill-skill command) to close the self-improvement loop.
 tools: Read, Edit, Write, Glob, Grep, Bash
-model: inherit
+model: opus
 color: purple
 ---
 
