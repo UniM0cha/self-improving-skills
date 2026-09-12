@@ -581,7 +581,7 @@ def main():
             # per-invocation model parameter beats the agent frontmatter, so no
             # file change is needed — default (unset) inherits the main model.
             model_pref = (os.environ.get("SIS_DISTILLER_MODEL") or "").strip().lower()
-            if model_pref and model_pref not in skill_paths.BANNED_CHILD_TIERS:  # 정책: Haiku·Fable 금지
+            if model_pref:
                 msg += ("\n\nSIS_DISTILLER_MODEL 이 설정되어 있습니다: 서브에이전트 호출에 "
                         "model=\"{0}\" 파라미터를 포함하세요(호출 시 지정한 model 이 에이전트 "
                         "frontmatter 보다 우선합니다).".format(model_pref))

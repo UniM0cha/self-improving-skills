@@ -80,12 +80,6 @@ def int_env(name, default):
         return default
 
 
-# Model tiers no child session or subagent of this plugin may run on: Haiku
-# hallucinates and under-works on exploration, Fable costs twice Opus. A knob
-# naming one of these is ignored and the account's own model is inherited.
-BANNED_CHILD_TIERS = ("haiku", "fable")
-
-
 def float_env(name, default):
     """Like int_env, for the similarity thresholds."""
     try:

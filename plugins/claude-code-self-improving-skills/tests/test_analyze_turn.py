@@ -199,12 +199,6 @@ def test_distiller_model_env_included_in_nudge(run_analyzer, monkeypatch):
     assert r["decision"] == "block" and 'model="sonnet"' in r["reason"]
 
 
-def test_distiller_model_haiku_ignored(run_analyzer, monkeypatch):
-    monkeypatch.setenv("SIS_DISTILLER_MODEL", "haiku")  # 정책: 서브에이전트 Haiku 금지
-    r = run_analyzer(_work_rows(), "m2")
-    assert r["decision"] == "block" and "model=" not in r["reason"]
-
-
 def test_seed_labels_user_vs_distilled(run_analyzer, sandbox, store_data):
     sandbox.make_skill("hand-made")
     sandbox.make_skill("auto-made",

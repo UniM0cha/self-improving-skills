@@ -1847,11 +1847,6 @@ def _run_job(
     # Empty means "don't pass --model", i.e. inherit the account's own model.
     override = os.environ.get("SIS_CURATE_MODEL" if library_pass else "SIS_DISTILLER_MODEL")
     model = str(job.get("model") or override or "").strip() or None
-    policy_note = ""
-    if model and model.lower() in skill_paths.BANNED_CHILD_TIERS:
-        policy_note = (" [model '{0}' is not allowed for a child session (Haiku/Fable policy); "
-                       "the account's own model was inherited instead]".format(model))
-        model = None
 
     if cli_version_used:
         queue.set_cli_version(job_id, owner, cli_version_used)
@@ -2022,8 +2017,6 @@ def _run_job(
 
     skill_guard.stamp_provenance(guard["installed"])
     merged = _merge_guard(structured, guard, _denials(result.stdout))
-    if policy_note:
-        merged["summary"] = (str(merged.get("summary") or "") + policy_note)[:4000]
 
     updated = queue.complete(job_id, owner, merged)
     _release_baseline(baseline_dir)

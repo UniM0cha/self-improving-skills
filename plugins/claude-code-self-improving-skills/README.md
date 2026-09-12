@@ -53,11 +53,11 @@ skill-distiller 서브에이전트 (격리 컨텍스트)
 | `SIS_DISTILL_THRESHOLD` | `40` | 증류 nudge를 띄울, 마지막 증류 이후 누적 도구 호출 수. 0.17.0 의 12 에서 올림 — 그때는 378회 중 92% 가 스킬을 써서 라이브러리가 하루 10개씩 늘었음 |
 | `SIS_MIN_FILE_EDITS` | `3` | nudge 조건: 마지막 증류 이후 실제 파일 편집(Edit/Write/MultiEdit) 최소 횟수. 순수 탐색·질의 턴은 트리거하지 않게 함 |
 | `SIS_DISTILL_READONLY_THRESHOLD` | `80` | 파일 편집이 **0회**인 구간도 도구 호출이 이 수를 넘으면 nudge — 긴 조사·디버깅 세션의 진단 기법(커맨드 사다리·원인 규명 패턴)이 영원히 증류되지 않는 갭을 막음 (Hermes 는 툴 iteration 만으로 트리거) |
-| `SIS_DISTILLER_MODEL` | (없음) | 증류를 **계정 기본 모델이 아닌 특정 티어**로 돌리고 싶을 때만 지정. 권장값 `sonnet` — 계정 모델이 Fable 이면 증류 한 번에 20만 자 전사를 Fable 요율로 읽습니다. 미설정이면 자식에 `--model` 을 넘기지 않아 계정이 지금 쓰는 모델을 그대로 물려받습니다. foreground 모드에서는 nudge·/distill-skill 이 distiller 호출에 `model="<값>"` 을 포함하라고 안내하는 용도로도 쓰입니다. `haiku`·`fable` 값은 무시하고 계정 모델을 물려받습니다(자식 세션·서브에이전트 Haiku/Fable 금지 정책, 잡 summary 에 기록) |
+| `SIS_DISTILLER_MODEL` | (없음) | 증류를 **계정 기본 모델이 아닌 특정 티어**로 돌리고 싶을 때만 지정(예: `sonnet`). 미설정이면 자식에 `--model` 을 넘기지 않아 계정이 지금 쓰는 모델을 그대로 물려받습니다. foreground 모드에서는 nudge·/distill-skill 이 distiller 호출에 `model="<값>"` 을 포함하라고 안내하는 용도로도 쓰입니다. 지정한 값은 그대로 넘깁니다 — 플러그인은 티어를 가리지 않습니다 |
 | `SIS_CURATE_MIN_SKILLS` | `8` | 자동 큐레이션을 시작하는 학습 스킬 수 |
 | `SIS_CURATE_INTERVAL_DAYS` | `7` | 큐레이터 자동 실행 간격(일) |
 | `SIS_AUTO_CURATE` | (없음) | `0` 으로 설정하면 **의미 기반 통합 패스의 백그라운드 자동 실행을 끔**(시간 기반 stale/archive 전이는 계속 동작). 끄면 SessionStart 가 `/curate-skills` 수동 실행을 안내 |
-| `SIS_CURATE_MODEL` | (없음) | 통합·압축 패스를 **계정 기본 모델이 아닌 특정 티어**로 돌리고 싶을 때만 지정. 권장값 `opus`(여러 스킬을 합치는 판단이라 Sonnet 보다 한 단계 위). 미설정이면 증류와 동일하게 계정 모델을 물려받음. `haiku`·`fable` 은 무시 |
+| `SIS_CURATE_MODEL` | (없음) | 통합·압축 패스를 **계정 기본 모델이 아닌 특정 티어**로 돌리고 싶을 때만 지정. 미설정이면 증류와 동일하게 계정 모델을 물려받음 |
 | `SIS_CURATE_MAX_JOBS` | `5` | 통합 패스 한 번에 큐에 넣는 클러스터 잡 수. 클러스터는 `skill_similarity.py` 가 이름·설명 유사도로 미리 계산하고, 잡 하나가 클러스터 하나(최대 6개, 합계 90,000자)만 다뤄 600초 안에 끝난다 |
 | `SIS_COMPRESS_MAX_JOBS` | `6` | 통합 패스와 함께 큐에 넣는 설명 압축 잡 수. 클러스터에 들지 않은 설명 300자 초과 스킬을 20개씩 묶어 description 한 줄만 고치게 하고, 본문을 건드린 결과는 되돌린다 |
 | `SIS_TRANSITION_INTERVAL_DAYS` | `1` | 시간 기반 stale/archive 전이의 실행 간격. 무료·결정론적이라 매일 돈다(LLM 패스는 `SIS_CURATE_INTERVAL_DAYS`) |

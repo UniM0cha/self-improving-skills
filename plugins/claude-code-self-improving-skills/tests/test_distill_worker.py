@@ -755,14 +755,3 @@ def test_a_compress_batch_skips_skills_already_within_the_cap(worker, queue, san
     assert job["result"]["status"] == "nothing_to_save" and "within the cap" in job["result"]["summary"]
     assert not (tmp_path / "prompt.txt").exists()
 
-
-def test_a_banned_tier_override_is_ignored(worker, queue, tmp_path, monkeypatch):
-    """SIS_DISTILLER_MODEL=fable (or haiku) must not reach the child: the
-    account's model is inherited and the job says why."""
-    monkeypatch.setenv("SIS_DISTILLER_MODEL", "fable")
-    transcript = _transcript(tmp_path / "t.jsonl", _chain("user", "assistant"))
-    _enqueue(queue, transcript, 2)
-    _run(worker, queue, _capturing_claude(tmp_path))
-    argv = (tmp_path / "argv.txt").read_text(encoding="utf-8").splitlines()
-    assert "--model" not in argv
-    assert "Haiku/Fable policy" in queue.list_jobs()[0]["result"]["summary"]

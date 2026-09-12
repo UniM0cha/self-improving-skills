@@ -107,8 +107,8 @@ All configuration is optional. Set these in your shell or in `~/.claude/settings
 | `SIS_DISTILL_THRESHOLD` | `40` | Tool-call count since the last distillation before distillation can trigger (0.18.0: raised from 12 — at 12, 92% of background runs wrote a skill and the library grew by ~10 a day) |
 | `SIS_MIN_FILE_EDITS` | `3` | Minimum file edits since the last distillation; prevents pure research chats from triggering |
 | `SIS_DISTILL_READONLY_THRESHOLD` | `80` | Edit-free segments still distill past this many tool calls (diagnostic technique from long investigations) |
-| `SIS_DISTILLER_MODEL` | unset | Pin the distillation child to a tier; recommended `sonnet`. Unset inherits the account model. `haiku`/`fable` are ignored |
-| `SIS_CURATE_MODEL` | unset | Pin the consolidation/compression children to a tier; recommended `opus`. `haiku`/`fable` are ignored |
+| `SIS_DISTILLER_MODEL` | unset | Pin the distillation child to a tier (e.g. `sonnet`); unset inherits the account model. Passed through as given |
+| `SIS_CURATE_MODEL` | unset | Pin the consolidation/compression children to a tier; unset inherits the account model |
 | `SIS_MAX_LEARNED_SKILLS` | `100` | Library cap: at or above it the worker forbids new skills and the guard quarantines any it still writes under `~/.claude/self-improve/candidates/` (patching is never blocked) |
 | `SIS_PROMPT_NEIGHBOURS` | `15` | Existing skills most related to the transcript, listed in the distillation prompt as patch targets |
 | `SIS_DUP_NAME_JACCARD` | `0.5` | Name-token overlap above which a new skill is refused as a near-duplicate |
