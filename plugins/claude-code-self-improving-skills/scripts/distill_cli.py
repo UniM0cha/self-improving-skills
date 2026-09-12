@@ -39,10 +39,15 @@ REMEDIES = {
         "your organization disables bypassPermissions; background distillation "
         "cannot write skills. Set SIS_REVIEW_MODE=foreground to keep the nudge."
     ),
-    # Kept only to explain jobs blocked by the old rule; nothing produces it now.
+    # Kept only to explain jobs blocked by old rules; nothing produces these now.
     "symlinked_skills": (
         "blocked by a rule that no longer exists — a symlinked skill used to "
         "refuse the whole run. `retry --all-blocked` picks these up."
+    ),
+    "out_of_scope_write": (
+        "blocked by a rule that no longer exists — the guard used to fail a run "
+        "when a home file such as ~/.claude/settings.json changed, which the CLI "
+        "itself does. `retry --all-blocked` picks these up."
     ),
     "unprotected_write": (
         "the guard saw a change it could not guarantee a rollback for — inspect "
@@ -95,6 +100,17 @@ def cmd_status(args: argparse.Namespace) -> int:
     except OSError as exc:
         symlinked = {"error": "could not scan the skill tree: {0}".format(exc)}
 
+    # New skills the guard refused (library cap, near-duplicate) are parked
+    # here rather than dropped; a human decides whether any deserves a place.
+    tray = skill_guard.candidates_dir()
+    try:
+        parked = sorted(
+            entry for entry in os.listdir(tray)
+            if os.path.isdir(os.path.join(tray, entry))
+        ) if os.path.isdir(tray) else []
+    except OSError:
+        parked = []
+
     _print(
         {
             "mode": (os.environ.get("SIS_REVIEW_MODE") or "background"),
@@ -104,6 +120,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             "worker_running": queue.worker_alive(),
             "blocked": problems,
             "symlinked": symlinked,
+            "candidates": {"count": len(parked), "path": tray, "names": parked[:20]},
             "last_failure": status["last_failure"],
         }
     )

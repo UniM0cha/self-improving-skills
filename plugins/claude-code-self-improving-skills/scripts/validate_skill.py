@@ -46,9 +46,19 @@ except Exception:
 sis_io.pin_utf8_stdio()
 
 MAX_NAME = 64
+# The Claude Code contract ceiling. Existing skills are held to this so that a
+# routine edit to one of the 150+ skills written before 0.18.0 never trips a
+# rollback for a description it did not touch.
 MAX_DESCRIPTION = 1024
-DESC_WARN_LEN = 500  # soft advisory only — every session pays this in context
+# A NEW learned skill: the skill listing shows about this much per skill before
+# the 1%-of-context budget cuts descriptions from the least-used skills, so a
+# longer description is context spent on text the model never sees.
+MAX_DESCRIPTION_NEW = 300
+DESC_WARN_LEN = MAX_DESCRIPTION_NEW  # advisory for existing skills
 MAX_CONTENT = 100000
+# A NEW skill's body, frontmatter excluded. Compaction re-attaches at most
+# ~5,000 tokens of each invoked skill; anything longer belongs in references/.
+MAX_BODY_NEW = 20000
 PROVENANCE_VALUE = "self-improving-skills"
 # Hard charset rule (a violation BLOCKS + rolls back the edit).
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -109,7 +119,17 @@ def _scalar(frontmatter, key):
     return None
 
 
-def _validate(text):
+def _validate(text, *, is_new=False, previous_description=None):
+    """Structural problems that make `text` unacceptable as a SKILL.md.
+
+    `is_new` applies the 0.18.0 caps (MAX_DESCRIPTION_NEW, MAX_BODY_NEW) that
+    only a brand-new skill is held to. An existing skill keeps the contract
+    ceiling but may not GROW a description that is already over the cap: pass
+    its pre-edit `previous_description` and the edit is refused when the
+    description got longer while still over the cap. Shrinking it, or editing
+    only the body, always passes — so the library written before the caps can
+    still be maintained without ever being able to get worse.
+    """
     problems = []
     if len(text) > MAX_CONTENT:
         problems.append("파일이 너무 큽니다(>{0}자). references/ 로 본문을 분리하세요.".format(MAX_CONTENT))
@@ -132,11 +152,25 @@ def _validate(text):
     if not desc:
         problems.append("frontmatter 에 `description` 이 없습니다. 트리거 정확도의 핵심이니 "
                         "'이럴 때 사용한다'는 상황 중심으로 한 문장 작성하세요.")
+    elif is_new and len(desc) > MAX_DESCRIPTION_NEW:
+        problems.append("새 스킬의 `description` 이 {0}자입니다. {1}자 이하의 한 문장으로 쓰세요 — "
+                        "세션 스킬 목록은 그 길이만 보여 주고, 인접 상황 나열은 트리거를 "
+                        "넓히는 게 아니라 잘리게 합니다.".format(len(desc), MAX_DESCRIPTION_NEW))
     elif len(desc) > MAX_DESCRIPTION:
         problems.append("`description` 이 {0}자를 초과합니다.".format(MAX_DESCRIPTION))
+    elif (not is_new and previous_description is not None
+          and len(desc) > MAX_DESCRIPTION_NEW and len(desc) > len(previous_description)):
+        problems.append("`description` 이 {0}자에서 {1}자로 늘었습니다. 이미 {2}자를 넘는 설명은 "
+                        "더 길어질 수 없습니다 — 줄이거나 그대로 두세요."
+                        .format(len(previous_description), len(desc), MAX_DESCRIPTION_NEW))
 
     if not body or not body.strip():
         problems.append("frontmatter 뒤 본문(스킬 지침)이 비어 있습니다.")
+    elif is_new and len(body) > MAX_BODY_NEW:
+        problems.append("새 스킬의 본문이 {0}자입니다. {1}자 이하로 줄이고 나머지는 references/ 로 "
+                        "옮겨 SKILL.md 에는 한 줄 포인터만 두세요 — compact 뒤 재부착은 "
+                        "스킬당 약 5,000 토큰까지라 그 뒤는 잘립니다."
+                        .format(len(body), MAX_BODY_NEW))
 
     return problems
 
@@ -149,10 +183,15 @@ def _advisory(text, file_path=None):
     notes = []
     desc = _scalar(fm, "description") or ""
     if len(desc) > DESC_WARN_LEN:
-        notes.append("description이 {0}자입니다. 학습 스킬의 description은 앞으로 모든 "
-                     "세션의 시스템 프롬프트에 실리므로 길이가 곧 상시 컨텍스트 비용입니다. "
-                     "트리거 문구는 보존하면서 {1}자 이하로 압축을 고려하세요."
+        notes.append("description이 {0}자입니다. 새 스킬이었다면 {1}자 캡에 걸려 거부됐을 길이인데 "
+                     "기존 스킬이라 경고만 나갑니다. 세션 스킬 목록은 예산을 넘기면 덜 쓰는 "
+                     "스킬부터 설명을 떼어 내므로, 트리거 상황 하나를 지목하는 한 문장으로 "
+                     "{1}자 이하 압축을 권장합니다(늘리는 편집은 거부됩니다)."
                      .format(len(desc), DESC_WARN_LEN))
+    if _body and len(_body) > MAX_BODY_NEW:
+        notes.append("본문이 {0}자입니다. compact 뒤 재부착은 스킬당 약 5,000 토큰까지라 그 뒤는 "
+                     "잘립니다. 세부는 references/ 로 옮기고 SKILL.md 는 라우터로 두는 것을 "
+                     "권장합니다.".format(len(_body)))
     name = _scalar(fm, "name") or ""
     if name and NAME_RE.match(name) and not NAME_STRICT_RE.match(name):
         notes.append("`name`에 선행·후행·연속 하이픈이 있습니다({0}). 공식 스킬 규약 위반이니 "
@@ -306,7 +345,21 @@ def main():
     if guard_msg:
         feedback(guard_msg)
 
-    problems = _validate(text)
+    # New or existing is decided by the PreToolUse backup: backup_skill.py
+    # copies an existing file and drops any stale copy for a new one, so a
+    # missing backup means this SKILL.md did not exist before the edit.
+    bp = backup_path(file_path)
+    is_new = not os.path.isfile(bp)
+    previous_description = None
+    if not is_new:
+        try:
+            with open(bp, encoding="utf-8", errors="ignore") as fh:
+                prev_fm, _prev_body = _split_frontmatter(fh.read())
+            if prev_fm is not None:
+                previous_description = _scalar(prev_fm, "description") or ""
+        except Exception:
+            previous_description = None
+    problems = _validate(text, is_new=is_new, previous_description=previous_description)
     if not problems:
         _stamp_provenance(file_path, text)
         _record_patch(file_path, text, payload)

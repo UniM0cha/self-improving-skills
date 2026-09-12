@@ -19,7 +19,7 @@ def _seed(sandbox, name, idle_days, created_by="agent", **fields):
 
 def test_stale_archive_and_reactivation(sandbox):
     _seed(sandbox, "fresh-skill", 5)
-    _seed(sandbox, "stale-skill", 45)
+    _seed(sandbox, "stale-skill", 35)
     _seed(sandbox, "dead-skill", 120)
     summary = sandbox.curator.run()
     assert [x["name"] for x in summary["stale"]] == ["stale-skill"]
@@ -31,6 +31,26 @@ def test_stale_archive_and_reactivation(sandbox):
     sandbox.usage_store.set_fields("stale-skill", last_used_at=_iso_days_ago(0))
     summary2 = sandbox.curator.run()
     assert "stale-skill" in summary2["reactivated"]
+
+
+def test_a_distiller_patch_does_not_reset_the_idle_clock(sandbox):
+    _seed(sandbox, "auto-tended", 60)
+    # The distiller keeps touching it (a patch event with created_by=agent)...
+    sandbox.usage_store.apply_events([("auto-tended", "patch", "agent")])
+    rec = sandbox.usage_store.all_records()["auto-tended"]
+    assert rec["last_patched_at"] is not None and rec["last_user_patched_at"] is None
+    # ...but nobody has used or viewed it in 60 days, so it is archived anyway.
+    summary = sandbox.curator.run()
+    assert [x["name"] for x in summary["archived"]] == ["auto-tended"]
+
+
+def test_a_user_edit_keeps_a_skill_out_of_the_archive(sandbox):
+    _seed(sandbox, "hand-tended", 60)
+    sandbox.usage_store.apply_events([("hand-tended", "patch", "user")])
+    summary = sandbox.curator.run()
+    assert summary["archived"] == []
+    assert sandbox.curator._idle_days(sandbox.usage_store.all_records()["hand-tended"],
+                                      sandbox.curator._now()) == 0
 
 
 def test_user_and_pinned_skills_untouched(sandbox):
@@ -45,12 +65,12 @@ def test_user_and_pinned_skills_untouched(sandbox):
 
 
 def test_use_count_extends_archive_threshold(sandbox):
-    _seed(sandbox, "proven-skill", 120, use_count=3)
-    _seed(sandbox, "unproven-skill", 120, use_count=2)
+    _seed(sandbox, "proven-skill", 60, use_count=3)
+    _seed(sandbox, "unproven-skill", 60, use_count=2)
     summary = sandbox.curator.run()
     archived = [x["name"] for x in summary["archived"]]
     assert "unproven-skill" in archived
-    assert "proven-skill" not in archived  # 90d * 2 for use_count >= 3
+    assert "proven-skill" not in archived  # 45d * 2 for use_count >= 3
     _seed(sandbox, "proven-but-ancient", 200, use_count=3)
     summary2 = sandbox.curator.run()
     assert "proven-but-ancient" in [x["name"] for x in summary2["archived"]]

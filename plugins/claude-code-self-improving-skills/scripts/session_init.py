@@ -14,8 +14,17 @@ Output contract: a SessionStart hook adds context by printing
 to stdout. Fails safe to silent (no context) on any error.
 
 Config:
-  SIS_CURATE_MIN_SKILLS  learned-skill count above which curation is suggested (default 8)
-  SIS_CURATE_INTERVAL_DAYS  days since last curation before re-suggesting (default 7)
+  SIS_TRANSITION_INTERVAL_DAYS  days between the deterministic stale/archive passes (default 1)
+  SIS_CURATE_MIN_SKILLS  learned-skill count above which consolidation runs (default 8)
+  SIS_CURATE_INTERVAL_DAYS  days between automatic consolidation passes (default 7)
+  SIS_CURATE_MAX_JOBS    consolidation cluster jobs queued per pass (default 5)
+  SIS_COMPRESS_MAX_JOBS  description-compression batch jobs queued per pass (default 6)
+  SIS_AUTO_CURATE        "0" turns the background library passes off
+
+Two clocks since 0.18.0. The time-based transitions are free and deterministic,
+so they run daily; the LLM passes (consolidation clusters, compression batches)
+are weekly. Through 0.17.0 one seven-day clock gated both, which is why the
+transitions ran fifteen times while the consolidation ran four.
 """
 
 import json
@@ -122,9 +131,16 @@ def _background_note():
             "심볼릭 링크 때문에 보류됐던 증류 작업 {0}건이 있습니다 — 이 제한은 "
             "없어졌으니 /distill-status retry 로 재시도하세요".format(
                 blocked_by_code["symlinked_skills"]))
+    if blocked_by_code.get("out_of_scope_write"):
+        # Same story as symlinked_skills: the home-file watchlist is gone.
+        alerts.append(
+            "홈 파일 감시 때문에 보류됐던 증류 작업 {0}건이 있습니다 — 이 검사는 "
+            "없어졌으니 /distill-status retry 로 재시도하세요".format(
+                blocked_by_code["out_of_scope_write"]))
     other_blocked = sum(
         count for code, count in blocked_by_code.items()
-        if code not in ("authentication_required", "unprotected_write", "symlinked_skills"))
+        if code not in ("authentication_required", "unprotected_write",
+                        "symlinked_skills", "out_of_scope_write"))
     if other_blocked:
         alerts.append("보류된 증류 작업 {0}건 (/distill-status)".format(other_blocked))
     if counts.get("failed"):
@@ -183,10 +199,7 @@ def _read_seen():
 
 
 def _int_env(name, default):
-    try:
-        return int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        return default
+    return skill_paths.int_env(name, default)
 
 
 def _count_learned_skills():
@@ -240,15 +253,36 @@ def _write_curator_state(state):
 
 
 def _curation_status(learned_count):
-    """'seed' (first ever — defer), 'due' (run now), or 'idle'."""
+    """'seed' (first ever — defer), 'due' (run the transitions now), or 'idle'."""
     state = _read_curator_state()
     if "last_run" not in state:
         return "seed"
     if learned_count < _int_env("SIS_CURATE_MIN_SKILLS", 8):
         return "idle"
-    interval = _int_env("SIS_CURATE_INTERVAL_DAYS", 7) * 86400
+    interval = _int_env("SIS_TRANSITION_INTERVAL_DAYS", 1) * 86400
     try:
         last = float(state.get("last_run", 0))
+    except (TypeError, ValueError):
+        last = 0.0
+    return "due" if (time.time() - last) >= interval else "idle"
+
+
+def _consolidation_status(learned_count):
+    """Whether the weekly LLM passes (clusters, compression) are due.
+
+    A state file without `last_consolidation` — every install upgraded from
+    0.17.0 — is due at once: that is the first pass over a library the old
+    clock never got to."""
+    state = _read_curator_state()
+    if "last_run" not in state:
+        return "seed"
+    if learned_count < _int_env("SIS_CURATE_MIN_SKILLS", 8):
+        return "idle"
+    if "last_consolidation" not in state:
+        return "due"
+    interval = _int_env("SIS_CURATE_INTERVAL_DAYS", 7) * 86400
+    try:
+        last = float(state.get("last_consolidation", 0))
     except (TypeError, ValueError):
         last = 0.0
     return "due" if (time.time() - last) >= interval else "idle"
@@ -271,7 +305,8 @@ def _run_curator(state, lines):
         if na or ns or nr:
             lines.append(
                 "[큐레이터] 미사용 스킬 자동 정리 실행: stale {0}개, 아카이브 {1}개, 재활성화 {2}개. "
-                "아카이브된 스킬은 ~/.claude/skills/.archive/ 로 이동(삭제 아님, /restore-skill 로 복구). "
+                "아카이브된 스킬은 ~/.claude/skills/.archive/ 로 이동(삭제 아님, 하나씩은 /restore-skill, "
+                "이번 정리 전체를 되돌리려면 /curator-rollback). "
                 "세부 리포트는 ~/.claude/self-improve/logs/curator/.".format(ns, na, nr)
             )
         else:
@@ -279,14 +314,38 @@ def _run_curator(state, lines):
     _write_curator_state(state)
 
 
-def _enqueue_curation(lines):
-    """Hand the semantic consolidation pass to the background worker.
+def _library_passes():
+    """The cluster and batch jobs the library needs right now, computed
+    deterministically so the same tree yields the same jobs (and the queue's
+    (session_id, prompt_id) key folds repeats into one)."""
+    import skill_similarity
+    try:
+        import usage_store
+        records = usage_store.all_records()
+    except Exception:
+        records = {}
+    inventory = skill_similarity.read_inventory(records=records)
+    clusters = skill_similarity.clusters(inventory)[: _int_env("SIS_CURATE_MAX_JOBS", 5)]
+    clustered = {m for c in clusters for m in c["members"]}
+    # Compression waits for consolidation: a description rewritten today would
+    # be merged away tomorrow. Members of a pending cluster are left out.
+    over = skill_similarity.over_cap(inventory, exclude=clustered)
+    batches = skill_similarity.batches(over)[: _int_env("SIS_COMPRESS_MAX_JOBS", 6)]
+    return clusters, batches
 
-    The time-based transitions above are deterministic, so they run inline.
+
+def _enqueue_curation(lines):
+    """Hand the weekly LLM passes to the background worker: one job per
+    cluster of similar skills (consolidation) and one per batch of over-cap
+    descriptions (compression).
+
+    The time-based transitions are deterministic, so they run inline.
     Deciding that five narrow skills are really one — reading them and writing
     the umbrella — is judgement work that needs a model, and doing it inline
     would block the session start it was triggered from. So it goes on the same
-    queue the Stop hook uses, with `trigger=curate`.
+    queue the Stop hook uses. One job per cluster keeps each child's work small
+    enough to finish inside its 600-second clock; the 0.17.0 single pass over
+    the whole library never did.
 
     Best-effort by construction: every failure path falls through to the manual
     pointer rather than raising, because a SessionStart hook must never be the
@@ -296,42 +355,61 @@ def _enqueue_curation(lines):
         lines.append("[큐레이터] 자동 통합은 꺼져 있습니다(SIS_AUTO_CURATE=0). "
                      "직접 정리하려면 /curate-skills 를 실행하세요.")
         return
-    queued_id = None
+    queued_clusters = 0
+    queued_batches = 0
+    planned = None
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import distill_queue
         import distill_worker
 
         if distill_worker.discover_claude():
+            clusters, batches = _library_passes()
+            planned = (len(clusters), len(batches))
             queue = distill_queue.DistillQueue()
-            result = queue.enqueue(
-                session_id="curator",
-                # One consolidation per UTC day at most: the queue keys
+            day = time.strftime("%Y%m%d", time.gmtime())
+            for cluster in clusters:
+                # One job per cluster per UTC day: the queue keys
                 # (session_id, prompt_id) uniquely, so parallel session starts
-                # on the same day collapse to a single job instead of racing
-                # several children over the same skill tree.
-                prompt_id="curate-{0}".format(time.strftime("%Y%m%d", time.gmtime())),
-                transcript_path="",
-                transcript_rows=0,
-                signal=False,
-                signal_source="session_start",
-                trigger=distill_worker.CURATE_TRIGGER,
-            )
-            queued_id = result.get("job_id")
-            if queued_id:
+                # on the same day collapse to a single job per cluster.
+                result = queue.enqueue(
+                    session_id="curator-{0}".format(cluster["id"]),
+                    prompt_id="curate-{0}".format(day),
+                    transcript_path="", transcript_rows=0, signal=False,
+                    signal_source="session_start", trigger=distill_worker.CURATE_TRIGGER,
+                    payload={"kind": "cluster", "id": cluster["id"], "members": cluster["members"]},
+                )
+                queued_clusters += 1 if result.get("enqueued") and not result.get("coalesced") else 0
+            for batch in batches:
+                result = queue.enqueue(
+                    session_id="compress-{0}".format(batch["id"]),
+                    prompt_id="compress-{0}".format(day),
+                    transcript_path="", transcript_rows=0, signal=False,
+                    signal_source="session_start", trigger=distill_worker.COMPRESS_TRIGGER,
+                    payload={"kind": "batch", "id": batch["id"], "members": batch["members"]},
+                )
+                queued_batches += 1 if result.get("enqueued") and not result.get("coalesced") else 0
+            if queued_clusters or queued_batches:
                 try:
                     distill_worker.launch_detached()
                 except Exception:
-                    # The job is durable; the next SessionStart relaunches it.
+                    # The jobs are durable; the next SessionStart relaunches them.
                     pass
     except Exception:
-        queued_id = None
+        planned = None
 
-    if queued_id:
+    state = _read_curator_state()
+    state["last_consolidation"] = time.time()
+    _write_curator_state(state)
+
+    if queued_clusters or queued_batches:
         lines.append(
-            "[큐레이터] 중복 스킬 통합 패스를 백그라운드에 맡겼습니다 — 이 대화는 그대로 진행하시면 "
-            "됩니다. 결과는 다음 세션 시작 시 보고되고, 되돌리려면 /curator-rollback 을 쓰세요."
+            "[큐레이터] 중복 스킬 통합 잡 {0}건, 설명 압축 잡 {1}건을 백그라운드에 맡겼습니다 — 이 대화는 "
+            "그대로 진행하시면 됩니다. 결과는 다음 세션 시작 시 보고되고, 되돌리려면 "
+            "/curator-rollback 을 쓰세요.".format(queued_clusters, queued_batches)
         )
+    elif planned == (0, 0):
+        lines.append("[큐레이터] 통합할 클러스터도 압축할 설명도 없습니다.")
     else:
         lines.append("[큐레이터] 중복 스킬의 의미 기반 통합이 필요하면 /curate-skills 를 실행하세요.")
 
@@ -393,11 +471,13 @@ def main():
     try:
         status = _curation_status(learned)
         if status == "seed":
-            # First ever tick: seed the clock and DEFER (never curate on install).
-            _write_curator_state({"last_run": time.time(), "run_count": 0})
-        elif status == "due":
-            _run_curator(_read_curator_state(), lines)
-            if background:
+            # First ever tick: seed both clocks and DEFER (never curate on install).
+            now = time.time()
+            _write_curator_state({"last_run": now, "run_count": 0, "last_consolidation": now})
+        else:
+            if status == "due":
+                _run_curator(_read_curator_state(), lines)
+            if background and _consolidation_status(learned) == "due":
                 # Only in background mode: foreground/off means the user opted
                 # out of this plugin spawning child sessions, and a consolidation
                 # pass is exactly that.

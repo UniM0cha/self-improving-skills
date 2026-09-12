@@ -277,3 +277,17 @@ def test_a_symlinked_queue_path_is_refused(tmp_path):
     link.symlink_to(real)
     with pytest.raises(ValueError):
         DistillQueue(link)
+
+
+def test_a_payload_round_trips_through_the_queue(queue):
+    result = queue.enqueue(
+        session_id="curator-abcd1234", prompt_id="curate-20260913", transcript_path="",
+        transcript_rows=0, signal=False, signal_source="session_start", trigger="curate",
+        payload={"kind": "cluster", "id": "abcd1234", "members": ["b-skill", "a-skill"]})
+    assert result["job"]["payload"] == {"kind": "cluster", "id": "abcd1234",
+                                        "members": ["b-skill", "a-skill"]}
+    assert queue.list_jobs()[0]["payload"]["members"] == ["b-skill", "a-skill"]
+    # A row written without one reads back as None, not as an error.
+    plain = queue.enqueue(session_id="s", prompt_id="p", transcript_path="/tmp/t.jsonl",
+                          transcript_rows=1, signal=True, signal_source="x", trigger="signal")
+    assert plain["job"]["payload"] is None

@@ -5,7 +5,7 @@ import json
 from conftest import tool_use
 
 
-def _work_rows(calls=12, edits=2):
+def _work_rows(calls=40, edits=3):
     rows = [tool_use("Bash", {"command": "x"}) for _ in range(calls)]
     rows += [tool_use("Edit", {"file_path": "/tmp/f{0}.py".format(i)}) for i in range(edits)]
     return rows
@@ -133,11 +133,13 @@ def test_a_one_line_core_edit_alone_does_not_spawn_a_session(run_analyzer, sandb
 
 
 def test_below_call_threshold_approves(run_analyzer):
-    assert run_analyzer(_work_rows(calls=9), "s")["decision"] == "approve"
+    # 30 calls + 3 edits = 33 tool uses, under the 40-call threshold
+    assert run_analyzer(_work_rows(calls=30), "s")["decision"] == "approve"
 
 
 def test_below_edit_threshold_approves(run_analyzer):
-    assert run_analyzer(_work_rows(edits=1), "s")["decision"] == "approve"
+    # 42 tool uses clear the call threshold, but 2 edits are under the floor of 3
+    assert run_analyzer(_work_rows(edits=2), "s")["decision"] == "approve"
 
 
 def test_nudge_fires_only_once_per_segment(run_analyzer):
@@ -180,14 +182,14 @@ def test_core_advisory_fires_once(run_analyzer):
 
 
 def test_readonly_segment_nudges_at_higher_threshold(run_analyzer):
-    rows = [tool_use("Bash", {"command": "x"}) for _ in range(24)]
+    rows = [tool_use("Bash", {"command": "x"}) for _ in range(80)]
     r = run_analyzer(rows, "ro")
     assert r["decision"] == "block"
     assert "조사·디버깅" in r["reason"]  # read-only guidance branch
 
 
 def test_readonly_below_threshold_approves(run_analyzer):
-    rows = [tool_use("Bash", {"command": "x"}) for _ in range(23)]
+    rows = [tool_use("Bash", {"command": "x"}) for _ in range(79)]
     assert run_analyzer(rows, "ro2")["decision"] == "approve"
 
 

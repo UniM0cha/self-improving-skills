@@ -13,8 +13,11 @@ canonical account of that change and what it costs.
 What this module is, precisely: detection and rollback, not prevention. A bad
 write happens first and is undone after, and only inside the skill tree. That
 tree is fully snapshotted, so a write there is always caught. Outside it,
-nothing stops a write and it is detected only if it lands on a bounded
-watchlist of high-value files — a full-filesystem snapshot is not feasible.
+nothing stops a write and nothing observes one either: the watchlist of home
+files that 0.17.0 hashed before and after each run was removed in 0.18.0 by
+the plugin owner's decision — the CLI itself rewrites `~/.claude/settings.json`
+as normal operation, which blocked healthy runs, and the owner would rather
+inspect damage by hand than have the guard judge writes outside the tree.
 
 Symlinked entries are the one gap inside the tree. Following a link would pull
 arbitrary files into the snapshot or loop, so the walk stops there and a write
@@ -32,6 +35,7 @@ import stat
 from typing import Any, Dict, List, Optional, Set
 
 import skill_paths
+import skill_similarity
 import validate_skill
 
 try:
@@ -44,44 +48,6 @@ except Exception:  # pragma: no cover - telemetry is best-effort
 # the cap we keep hashes (detection still works) but lose rollback content,
 # which is reported rather than silently accepted.
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
-
-
-def watchlist(home: Optional[str] = None) -> List[str]:
-    """High-value files outside the skill tree that must never change.
-
-    Kept deliberately short: every entry is a file whose modification would
-    grant persistence or exfiltration, so a hit here is worth interrupting the
-    user for. This is detection only — nothing prevents these writes. The list
-    used to mirror the worker's deny rules; those are empty now, so a hit means
-    the write already happened.
-
-    NOT here: `.claude.json`. The child IS a Claude Code session, and the CLI
-    rewrites that global-state file as normal operation — trust prompts, recent
-    projects, MCP state — through its own internals rather than a tool call.
-    Watching it would flag every healthy distillation as an out-of-scope write
-    (confirmed against a real `claude -p` run). It was covered by the deny rules
-    instead; with those gone it is neither denied nor watched, so a tool-call
-    write to it now passes unnoticed.
-    """
-    base = home or skill_paths.user_home()
-    relative = (
-        ".claude/settings.json",
-        ".claude/settings.local.json",
-        ".claude/CLAUDE.md",
-        ".zshrc",
-        ".zprofile",
-        ".zshenv",
-        ".bashrc",
-        ".bash_profile",
-        ".profile",
-        ".envrc",
-        ".npmrc",
-        ".gitconfig",
-    )
-    # Split each relative entry on "/" so os.path.join yields native separators
-    # — otherwise a Windows path is "C:\\home\\.claude/settings.json", a mixed
-    # form that no normalized path (or exact-string report check) will match.
-    return [os.path.join(base, *name.split("/")) for name in relative]
 
 
 def _digest(data: bytes) -> str:
@@ -184,7 +150,7 @@ def _owning_skill(path: str, root: str) -> Optional[str]:
 
 
 class Snapshot:
-    """The state of the skill tree and the watchlist at one moment.
+    """The state of the skill tree at one moment.
 
     File contents are written to `store`, not held in memory. If the worker is
     killed between the child's writes and `verify`, an in-memory baseline would
@@ -199,7 +165,6 @@ class Snapshot:
         self.store = store
         self.files: Dict[str, str] = {}
         self.modes: Dict[str, int] = {}
-        self.watched: Dict[str, Optional[str]] = {}
         self.patch_counts: Dict[str, int] = {}
         self.unbacked: Set[str] = set()
 
@@ -239,12 +204,6 @@ class Snapshot:
                     total += len(data)
                 else:
                     self.unbacked.add(path)
-        for path in watchlist(self.home):
-            # Followed on purpose: a dotfiles setup where ~/.zshrc is a symlink
-            # is normal, and hashing the link itself would report "absent" for
-            # a file the child can very much write through.
-            data = _read(path, follow=True)
-            self.watched[path] = _digest(data) if data is not None else None
         self.patch_counts = _patch_counts()
         return self
 
@@ -338,6 +297,97 @@ def _is_pinned(name: str, previous_text: Optional[str]) -> bool:
     return False
 
 
+def _description_of(text: Optional[str]) -> Optional[str]:
+    """The frontmatter description of a SKILL.md text, "" when the file has
+    frontmatter but no description, None when there is no frontmatter."""
+    if text is None:
+        return None
+    fm, _body = validate_skill._split_frontmatter(text)
+    if fm is None:
+        return None
+    return validate_skill._scalar(fm, "description") or ""
+
+
+def _baseline_inventory(before: "Snapshot") -> List[skill_similarity.SkillFacts]:
+    """The library as it stood BEFORE the run, read from the snapshot store.
+
+    The live tree already holds this run's writes, so judging a new skill
+    against it would compare the skill with itself. Only direct children of
+    the root count, and `.archive/` is skipped, matching `read_inventory`.
+    """
+    records: Dict[str, Any] = {}
+    if usage_store is not None:
+        try:
+            records = usage_store.all_records()
+        except Exception:
+            records = {}
+    inventory: List[skill_similarity.SkillFacts] = []
+    archive_root = os.path.join(before.root, ".archive") + os.sep
+    for path in sorted(before.files):
+        if os.path.basename(path) != "SKILL.md" or path.startswith(archive_root):
+            continue
+        owner = _owning_skill(path, before.root)
+        if owner is None or os.path.dirname(path) != owner:
+            continue  # nested under references/ or the like: not a skill
+        text = _decode(before.original(path))
+        if text is None:
+            continue
+        name = skill_paths.skill_name(path)
+        inventory.append(skill_similarity.facts_from_text(name, text, records.get(name)))
+    return inventory
+
+
+def _new_skill_gate(name: str, text: str, inventory: List[skill_similarity.SkillFacts]) -> Optional[str]:
+    """Why a structurally valid NEW skill still must not be installed, or None.
+
+    Two deterministic checks the prompt used to ask for in prose:
+      library_full      the library already holds SIS_MAX_LEARNED_SKILLS
+                        learned skills (default 100) — patch or candidate only
+      too_similar_to    an existing skill's name or description overlaps this
+                        one past SIS_DUP_NAME_JACCARD / SIS_DUP_DESC_JACCARD
+    The skill just written is not in the pre-run inventory, so it cannot be its
+    own match; a skill the same run PATCHED still counts — "patch foo and add
+    foo-v2" is exactly the shape this gate exists to catch.
+    """
+    cap = skill_paths.int_env("SIS_MAX_LEARNED_SKILLS", 100)
+    count = skill_similarity.learned_count(inventory)
+    if cap > 0 and count >= cap:
+        return "library_full:{0}/{1}".format(count, cap)
+    hit = skill_similarity.duplicate_of(
+        name, skill_similarity.frontmatter_description(text), inventory,
+        name_threshold=skill_paths.float_env("SIS_DUP_NAME_JACCARD", 0.5),
+        desc_threshold=skill_paths.float_env("SIS_DUP_DESC_JACCARD", 0.4))
+    if hit is not None:
+        other, score, kind = hit
+        return "too_similar_to:{0}@{1}({2})".format(other, score, kind)
+    return None
+
+
+def candidates_dir() -> str:
+    """Where a refused new skill keeps its content for a human to look at."""
+    return os.path.join(skill_paths.state_dir(), "candidates")
+
+
+def _quarantine(name: str, data: Optional[bytes]) -> Optional[str]:
+    """Park a refused new SKILL.md under the candidates tray instead of losing
+    it. Same name with the same bytes is idempotent; different bytes go to a
+    digest-suffixed sibling so no earlier candidate is overwritten."""
+    if not data:
+        return None
+    try:
+        folder = os.path.join(candidates_dir(), name)
+        os.makedirs(folder, exist_ok=True)
+        target = os.path.join(folder, "SKILL.md")
+        existing = _read(target)
+        if existing is not None and existing != data:
+            target = os.path.join(folder, "SKILL-{0}.md".format(_digest(data)[:8]))
+        with open(target, "wb") as handle:
+            handle.write(data)
+        return target
+    except OSError:
+        return None
+
+
 def _has_valid_skill(owner: str) -> bool:
     """Whether the directory currently holds a SKILL.md that passes validation."""
     text = _decode(_read(os.path.join(owner, "SKILL.md")))
@@ -371,11 +421,15 @@ def verify(before: Snapshot) -> Dict[str, Any]:
     """Re-check the skill tree after the child ran; revert anything unsafe.
 
     Returns a report the worker merges into the job result:
-      installed            skills whose new SKILL.md passed validation
+      installed            skills whose SKILL.md passed validation ("new": True
+                           when the run created it)
       assets               accepted non-SKILL.md files (references/, scripts/)
       rolled_back          files reverted (invalid, pinned, loose, or escaped)
-      out_of_scope_writes  watchlist files that changed
+      candidates           new skills refused by the library cap or the
+                           duplicate gate, parked under the candidates tray
       unprotected          paths the guard could not have reverted
+
+    Nothing outside the skill tree is observed (see the module docstring).
 
     Symlinked entries appear in none of these: they are neither snapshotted nor
     reverted nor flagged (see the module docstring). `symlinked_entries()` lists
@@ -389,6 +443,13 @@ def verify(before: Snapshot) -> Dict[str, Any]:
     assets: List[str] = []
     rolled_back: List[Dict[str, str]] = []
     unprotected: List[str] = []
+    candidates: List[Dict[str, str]] = []
+    baseline_inventory: List[List[skill_similarity.SkillFacts]] = []  # memo, built once
+
+    def inventory() -> List[skill_similarity.SkillFacts]:
+        if not baseline_inventory:
+            baseline_inventory.append(_baseline_inventory(before))
+        return baseline_inventory[0]
 
     after = Snapshot(root, before.home).capture()
     changed = sorted(
@@ -486,12 +547,24 @@ def verify(before: Snapshot) -> Dict[str, Any]:
             # skill that later edits are then blocked from fixing.
             reason = "pinned"
         else:
-            problems = validate_skill._validate(current_text)
+            # A brand-new skill is held to the 0.18.0 caps; an existing one
+            # only to "don't grow an over-cap description" (see _validate).
+            problems = validate_skill._validate(
+                current_text, is_new=not existed,
+                previous_description=_description_of(previous_text) if existed else None)
             if problems:
                 reason = "invalid: " + "; ".join(problems)
+            elif not existed:
+                # Structurally fine and brand new: the library-cap and
+                # near-duplicate checks decide whether it may join the library.
+                gate = _new_skill_gate(name, current_text, inventory())
+                if gate is not None:
+                    reason = gate
+                    parked = _quarantine(name, current_bytes)
+                    candidates.append({"name": name, "reason": gate, "path": parked or ""})
 
         if reason is None:
-            installed.append({"name": name, "path": path})
+            installed.append({"name": name, "path": path, "new": not existed})
             continue
         if owner:
             rejected_skills[owner] = reason
@@ -519,17 +592,15 @@ def verify(before: Snapshot) -> Dict[str, Any]:
         else:
             assets.append(path)
 
-    out_of_scope = [
-        path for path, digest in after.watched.items() if before.watched.get(path) != digest
-    ]
     _record_patches(installed, before.patch_counts)
 
     report: Dict[str, Any] = {
         "installed": installed,
         "assets": sorted(assets),
         "rolled_back": rolled_back,
-        "out_of_scope_writes": sorted(out_of_scope),
     }
+    if candidates:
+        report["candidates"] = candidates
     if archived:
         report["archived"] = archived
     if unprotected:
@@ -612,5 +683,7 @@ def stamp_provenance(installed: List[Dict[str, str]]) -> None:
         except Exception:
             continue
         stamped = _decode(_read(path))
-        if stamped is None or validate_skill._validate(stamped):
+        # Re-checked under the same rule set the install was judged by: a new
+        # skill stays a new skill for the caps even after the stamp.
+        if stamped is None or validate_skill._validate(stamped, is_new=bool(item.get("new"))):
             _restore(path, original)

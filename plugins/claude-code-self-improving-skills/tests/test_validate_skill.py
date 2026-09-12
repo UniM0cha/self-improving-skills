@@ -78,12 +78,43 @@ def test_new_broken_skill_warns_without_rollback(run_validator, sandbox):
     assert "name" in out and "롤백" not in out
 
 
-def test_long_description_gets_advisory_not_rollback(run_validator, sandbox):
+def test_an_existing_skill_over_the_cap_gets_an_advisory_not_a_rollback(run_validator, sandbox):
     body = "---\nname: chatty\ndescription: {0}\n---\nbody\n".format("x" * 600)
     d = sandbox.make_skill("chatty", body)
+    _backup(sandbox, "chatty")  # existing skill: the pre-edit copy makes it one
     out = run_validator(_payload(d / "SKILL.md"))
-    assert "압축" in out  # advisory present
+    assert "압축" in out and "롤백" not in out  # advisory present
     assert (d / "SKILL.md").read_text(encoding="utf-8").count("x" * 600) == 1  # untouched
+
+
+def test_a_new_skill_over_300_chars_of_description_is_rejected(run_validator, sandbox):
+    body = "---\nname: verbose\ndescription: {0}\n---\nbody\n".format("x" * 400)
+    d = sandbox.make_skill("verbose", body)  # no backup: brand new
+    out = run_validator(_payload(d / "SKILL.md"))
+    assert "문제가 있습니다" in out and "300자" in out and "롤백" not in out
+    assert "provenance" not in (d / "SKILL.md").read_text(encoding="utf-8")  # not accepted
+
+
+def test_a_new_skill_body_over_20k_points_at_references(run_validator, sandbox):
+    body = "---\nname: bulky\ndescription: d\n---\n{0}\n".format("y" * 20_001)
+    d = sandbox.make_skill("bulky", body)
+    out = run_validator(_payload(d / "SKILL.md"))
+    assert "문제가 있습니다" in out and "references/" in out
+
+
+def test_an_existing_description_may_shrink_but_not_grow(run_validator, sandbox):
+    tmpl = "---\nname: ratchet\ndescription: {0}\n---\nbody\n"
+    d = sandbox.make_skill("ratchet", tmpl.format("x" * 400))
+    _backup(sandbox, "ratchet")
+    (d / "SKILL.md").write_text(tmpl.format("x" * 500), encoding="utf-8")
+    out = run_validator(_payload(d / "SKILL.md"))
+    assert "롤백" in out and "늘었습니다" in out
+    assert (d / "SKILL.md").read_text(encoding="utf-8").count("x" * 400) == 1
+    _backup(sandbox, "ratchet")
+    (d / "SKILL.md").write_text(tmpl.format("x" * 350), encoding="utf-8")
+    out = run_validator(_payload(d / "SKILL.md"))
+    assert "롤백" not in out
+    assert (d / "SKILL.md").read_text(encoding="utf-8").count("x" * 350) == 1
 
 
 def test_hyphen_position_violation_is_advisory_only(run_validator, sandbox):

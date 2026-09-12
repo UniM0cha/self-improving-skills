@@ -23,7 +23,29 @@ def test_created_by_fixed_at_seed_time(sandbox):
     us = sandbox.usage_store
     us.apply_events([("a", "use", "user")])
     us.apply_events([("a", "patch", "agent")])  # later events can't relabel
-    assert us.all_records()["a"]["created_by"] == "user"
+    rec = us.all_records()["a"]
+    assert rec["created_by"] == "user"
+    # The per-event author IS read now (for last_user_patched_at), and it
+    # still never overwrites the seed-time label.
+    assert rec["last_user_patched_at"] is None
+
+
+def test_a_user_patch_stamps_last_user_patched_at(sandbox):
+    us = sandbox.usage_store
+    us.apply_events([("a", "patch", "user")])
+    rec = us.all_records()["a"]
+    assert rec["patch_count"] == 1
+    assert rec["last_user_patched_at"] == rec["last_patched_at"]
+
+
+def test_an_agent_patch_leaves_last_user_patched_at_alone(sandbox):
+    us = sandbox.usage_store
+    us.apply_events([("a", "patch", "user")])
+    stamped = us.all_records()["a"]["last_user_patched_at"]
+    us.apply_events([("a", "patch", "agent")])
+    rec = us.all_records()["a"]
+    assert rec["patch_count"] == 2
+    assert rec["last_user_patched_at"] == stamped
 
 
 def test_offsets_legacy_int_and_migration(sandbox):

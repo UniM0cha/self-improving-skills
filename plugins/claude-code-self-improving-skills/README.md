@@ -15,9 +15,10 @@
 
 부가:
 
+- **LIBRARY GOVERNANCE** (v0.18.0) — **생성을 예외로 되돌리고, 라이브러리가 스스로 줄어들게.** 0.17.0 까지의 실측: 백그라운드 증류 378회 중 92% 가 스킬을 써서 학습 스킬이 385개까지 늘었는데, Claude Code 세션 스킬 목록은 컨텍스트의 1% 예산을 넘기면 덜 쓰는 스킬부터 설명을 떼어 내므로 그중 설명이 보이는 것은 13개뿐이었고, 매주 돌던 시간 기반 정리기는 증류기 자신의 패치를 활동으로 세는 바람에 15회 연속 0건을 아카이브했다. 바뀐 것: (1) 증류기 프롬프트가 "쓰지 않는 것이 기본"이 되고 새 스킬은 사용자 정정·로드된 스킬의 결함·어느 스킬에도 자리가 없음 셋 중 하나를 넘어야 생긴다, 문턱 12/2/24 → 40/3/80. (2) 워커가 전사와 가장 겹치는 기존 스킬 15개를 프롬프트에 패치 대상으로 싣고, 실행 뒤 가드가 `skill_similarity.py` 로 이름·설명 유사도를 재어 근사 중복이거나 라이브러리가 `SIS_MAX_LEARNED_SKILLS`(100) 이상이면 새 스킬을 설치하지 않고 `~/.claude/self-improve/candidates/` 에 보관한다(`/distill-status` 가 보여줌). (3) 새 스킬은 설명 300자·본문 20,000자 캡, 기존 스킬은 캡을 넘는 설명을 더 늘리는 편집만 거부. (4) 정리기는 사용·열람·사람이 한 패치만 활동으로 보고 45일에 아카이브한다. (5) 자동 통합은 클러스터마다 잡 하나(하루 5건)로 쪼개 600초 안에 끝나게 하고, 클러스터 밖의 설명 300자 초과 스킬은 20개씩 압축 잡(하루 6건)으로 description 만 고친다. 시간 기반 전이는 하루, LLM 패스는 일주일 시계. (6) 홈 파일 감시 목록(범위 밖 쓰기 차단)은 제거 — CLI 자체가 `settings.json` 을 다시 써서 멀쩡한 잡을 막았다.
 - **TELEMETRY** (v0.2.0) — `Stop` 훅이 transcript에서 학습 스킬의 **사용 빈도를 추적**: `Skill` 호출→use, SKILL.md `Read`→view, `Write/Edit`→patch. `~/.claude/self-improve/skill_usage.json`에 use/view/patch 카운트 + 마지막 사용 시각 + `created_at` + `created_by`(agent/user)를 기록(atomic+flock, 세션별 offset으로 중복 방지). 이게 큐레이터가 "실제 안 쓰는 스킬"을 식별하는 데이터 기반입니다.
 - **VALIDATE + 트랜잭션 편집** (v0.5.0) — `PreToolUse` 훅이 학습 SKILL.md를 편집 **직전에 백업**하고, `PostToolUse` 훅이 편집 후 frontmatter·크기를 검증. 편집이 구조를 깨뜨리면 **백업에서 자동 롤백**(Hermes `_patch_skill`의 backup→re-validate→rollback 이식)하고 모델에 다시 시도하도록 알림. 정상 편집은 무간섭. 처음 만들어진 학습 스킬엔 `metadata.provenance` 자동 부착 + usage 레코드 시딩(티어링: distiller=agent, 사용자 직접=user).
-- **CURATE** (v0.3.0) — **시간기반 미사용 스킬 자동 정리**. `SessionStart` 훅이 큐레이션 주기(기본 7일)가 됐는지 확인하고, 됐으면 `curator_transitions.py`를 **인라인 자동 실행**: 마지막 활동(use/view/patch) 기준 **30일 미사용→stale, 90일→archive**(`.archive/` 로 이동, 삭제 아님). 변경 전 tar.gz 스냅샷을 뜨고, 다시 쓰이면 stale→active로 재활성화. **pin된 스킬과 사용자 작성(`created_by:user`) 스킬은 절대 건드리지 않음.** 의미 기반 중복 통합은 v0.17.0부터 백그라운드 자동 실행(아래 AUTO-CURATE), 수동 실행은 `/curate-skills`(병합 시 `absorbed_into` 기록). 수동 제어 커맨드: `/curator-status`(상태·통계), `/prune-skills`(N일 미사용 일괄, dry-run), `/archive-skill`(단일), `/pin-skill`(보호), `/restore-skill`(복구), `/curator-rollback`(스냅샷 전체 롤백 — usage 메타 포함, 롤백도 언두 가능).
+- **CURATE** (v0.3.0) — **시간기반 미사용 스킬 자동 정리**. `SessionStart` 훅이 큐레이션 주기(기본 7일)가 됐는지 확인하고, 됐으면 `curator_transitions.py`를 **인라인 자동 실행**: 마지막 활동(use/view/사람이 한 patch — 증류기의 patch 는 0.18.0 부터 제외) 기준 **30일 미사용→stale, 45일→archive**(`.archive/` 로 이동, 삭제 아님). 변경 전 tar.gz 스냅샷을 뜨고, 다시 쓰이면 stale→active로 재활성화. **pin된 스킬과 사용자 작성(`created_by:user`) 스킬은 절대 건드리지 않음.** 의미 기반 중복 통합은 v0.17.0부터 백그라운드 자동 실행(아래 AUTO-CURATE), 수동 실행은 `/curate-skills`(병합 시 `absorbed_into` 기록). 수동 제어 커맨드: `/curator-status`(상태·통계), `/prune-skills`(N일 미사용 일괄, dry-run), `/archive-skill`(단일), `/pin-skill`(보호), `/restore-skill`(복구), `/curator-rollback`(스냅샷 전체 롤백 — usage 메타 포함, 롤백도 언두 가능).
 - **AUTO-CURATE** (v0.17.0) — **의미 기반 통합도 백그라운드 자동 실행**. 지금까지 큐레이션은 두 층으로 갈라져 있었습니다: 시간 기반 전이(stale/archive)는 자동, 의미 기반 통합은 사용자가 `/curate-skills`를 직접 쳐야 하는 수동. 후자는 판단이 필요해 훅에서 인라인으로 돌 수 없었기 때문인데, 백그라운드 증류가 쓰는 `claude -p` 인프라를 그대로 재사용하면 됩니다. 큐레이션 주기가 됐을 때 `SessionStart` 훅이 시간 전이를 인라인 실행한 뒤, **통합 패스를 같은 큐에 `trigger=curate` 잡으로 얹습니다**(같은 baseline 스냅샷·롤백·가드를 그대로 받음). 결과는 다음 세션 시작 시 보고되고 `/curator-rollback` 으로 통째로 되돌릴 수 있습니다. 잡은 UTC 하루 1건으로 dedupe되어 세션을 여러 개 동시에 열어도 자식이 스킬 트리를 두고 경합하지 않습니다. 끄려면 `SIS_AUTO_CURATE=0`. 모델은 고정하지 않습니다 — 증류와 마찬가지로 계정이 현재 쓰는 모델을 그대로 물려받고, 다르게 쓰고 싶을 때만 `SIS_CURATE_MODEL` 로 지정합니다. 무인 실행이라 프롬프트는 보수적으로 지시합니다 — 서로를 인용하거나 한 작업의 여러 단면인 클러스터만 병합하고, 도메인만 겹치는 것은 넘어가며, 합계가 검증기 상한(100,000자)에 근접하는 묶음은 시도하지 않습니다. **아카이브 후 살아있는 스킬이 아카이브된 이름을 참조하고 있는지 grep으로 훑는 단계가 필수**입니다(첫 실전 패스에서 실제로 dangling 참조가 발생한 실패 모드).
 - **수동 트리거** — `/distill-skill` 로 언제든 증류를 직접 실행.
 - **MIGRATION** (v0.11.0) — 플러그인/마켓플레이스 **리네임 마이그레이션**. 2026-07 개편(`samton-claude`→`samton-plugins`, `self-improving-skills`→`claude-code-self-improving-skills` 등 4종)으로 orphan된 로컬 상태를 `/migration` 한 번으로 최신 이름에 올립니다: `~/.claude/settings.json`(permissions.allow 네임스페이스·enabledPlugins 키·stale marketplace URL), 학습 스킬 본문의 구 네임스페이스/경로 참조, `~/.codex/config.toml`, codex 상태 디렉토리·provenance. 기본 dry-run → 확인 후 `--apply`(파일별 백업, 멱등). rename 맵은 `scripts/migrate_local.py`에 데이터로 유지되어 향후 리네임에도 확장 가능. `provenance: self-improving-skills` 마커는 의도적으로 유지되는 값이라 건드리지 않습니다.
@@ -49,16 +50,23 @@ skill-distiller 서브에이전트 (격리 컨텍스트)
 | `SIS_CLAUDE_BIN` | 자동탐색 | `claude` 절대경로. GUI 로 뜬 훅은 PATH 에 `~/.local/bin` 이 없을 수 있어 필요할 때가 있음 |
 | `SIS_CORE_TOUCH_MIN_CALLS` | `6` | 코어 소스 편집(L1 권고)이 백그라운드 증류를 유발하려면 필요한 최소 도구 호출 수. 이게 없으면 이 리포에서 한 줄만 고쳐도 매 턴 세션이 뜸 |
 | `SIS_STATE_DIR` | `~/.claude/self-improve` | 큐·백업·텔레메트리를 전부 옮김 |
-| `SIS_DISTILL_THRESHOLD` | `12` | 증류 nudge를 띄울, 마지막 증류 이후 누적 도구 호출 수 |
-| `SIS_MIN_FILE_EDITS` | `2` | nudge 조건: 마지막 증류 이후 실제 파일 편집(Edit/Write/MultiEdit) 최소 횟수. 순수 탐색·질의 턴은 트리거하지 않게 함 |
-| `SIS_DISTILL_READONLY_THRESHOLD` | `24` | 파일 편집이 **0회**인 구간도 도구 호출이 이 수를 넘으면 nudge — 긴 조사·디버깅 세션의 진단 기법(커맨드 사다리·원인 규명 패턴)이 영원히 증류되지 않는 갭을 막음 (Hermes 는 툴 iteration 만으로 트리거) |
-| `SIS_DISTILLER_MODEL` | (없음) | 증류를 **계정 기본 모델이 아닌 특정 티어**로 돌리고 싶을 때만 지정(예: `sonnet`). 미설정이면 자식에 `--model` 을 넘기지 않아 계정이 지금 쓰는 모델을 그대로 물려받습니다. foreground 모드에서는 nudge·/distill-skill 이 distiller 호출에 `model="<값>"` 을 포함하라고 안내하는 용도로도 쓰입니다(`haiku` 값은 무시 — 서브에이전트 Haiku 금지 정책) |
+| `SIS_DISTILL_THRESHOLD` | `40` | 증류 nudge를 띄울, 마지막 증류 이후 누적 도구 호출 수. 0.17.0 의 12 에서 올림 — 그때는 378회 중 92% 가 스킬을 써서 라이브러리가 하루 10개씩 늘었음 |
+| `SIS_MIN_FILE_EDITS` | `3` | nudge 조건: 마지막 증류 이후 실제 파일 편집(Edit/Write/MultiEdit) 최소 횟수. 순수 탐색·질의 턴은 트리거하지 않게 함 |
+| `SIS_DISTILL_READONLY_THRESHOLD` | `80` | 파일 편집이 **0회**인 구간도 도구 호출이 이 수를 넘으면 nudge — 긴 조사·디버깅 세션의 진단 기법(커맨드 사다리·원인 규명 패턴)이 영원히 증류되지 않는 갭을 막음 (Hermes 는 툴 iteration 만으로 트리거) |
+| `SIS_DISTILLER_MODEL` | (없음) | 증류를 **계정 기본 모델이 아닌 특정 티어**로 돌리고 싶을 때만 지정. 권장값 `sonnet` — 계정 모델이 Fable 이면 증류 한 번에 20만 자 전사를 Fable 요율로 읽습니다. 미설정이면 자식에 `--model` 을 넘기지 않아 계정이 지금 쓰는 모델을 그대로 물려받습니다. foreground 모드에서는 nudge·/distill-skill 이 distiller 호출에 `model="<값>"` 을 포함하라고 안내하는 용도로도 쓰입니다. `haiku`·`fable` 값은 무시하고 계정 모델을 물려받습니다(자식 세션·서브에이전트 Haiku/Fable 금지 정책, 잡 summary 에 기록) |
 | `SIS_CURATE_MIN_SKILLS` | `8` | 자동 큐레이션을 시작하는 학습 스킬 수 |
 | `SIS_CURATE_INTERVAL_DAYS` | `7` | 큐레이터 자동 실행 간격(일) |
 | `SIS_AUTO_CURATE` | (없음) | `0` 으로 설정하면 **의미 기반 통합 패스의 백그라운드 자동 실행을 끔**(시간 기반 stale/archive 전이는 계속 동작). 끄면 SessionStart 가 `/curate-skills` 수동 실행을 안내 |
-| `SIS_CURATE_MODEL` | (없음) | 통합 패스를 **계정 기본 모델이 아닌 특정 티어**로 돌리고 싶을 때만 지정. 미설정이면 증류와 동일하게 계정 모델을 물려받음 |
+| `SIS_CURATE_MODEL` | (없음) | 통합·압축 패스를 **계정 기본 모델이 아닌 특정 티어**로 돌리고 싶을 때만 지정. 권장값 `opus`(여러 스킬을 합치는 판단이라 Sonnet 보다 한 단계 위). 미설정이면 증류와 동일하게 계정 모델을 물려받음. `haiku`·`fable` 은 무시 |
+| `SIS_CURATE_MAX_JOBS` | `5` | 통합 패스 한 번에 큐에 넣는 클러스터 잡 수. 클러스터는 `skill_similarity.py` 가 이름·설명 유사도로 미리 계산하고, 잡 하나가 클러스터 하나(최대 6개, 합계 90,000자)만 다뤄 600초 안에 끝난다 |
+| `SIS_COMPRESS_MAX_JOBS` | `6` | 통합 패스와 함께 큐에 넣는 설명 압축 잡 수. 클러스터에 들지 않은 설명 300자 초과 스킬을 20개씩 묶어 description 한 줄만 고치게 하고, 본문을 건드린 결과는 되돌린다 |
+| `SIS_TRANSITION_INTERVAL_DAYS` | `1` | 시간 기반 stale/archive 전이의 실행 간격. 무료·결정론적이라 매일 돈다(LLM 패스는 `SIS_CURATE_INTERVAL_DAYS`) |
+| `SIS_MAX_LEARNED_SKILLS` | `100` | 학습 스킬 상한. 이 수 이상이면 워커 프롬프트가 새 스킬 생성을 금지하고, 그래도 만들어진 새 SKILL.md 는 가드가 설치하지 않고 `~/.claude/self-improve/candidates/` 에 보관한다. 패치는 막지 않는다 |
+| `SIS_PROMPT_NEIGHBOURS` | `15` | 증류 프롬프트에 "패치 대상"으로 싣는, 전사와 가장 겹치는 기존 스킬 수 |
+| `SIS_DUP_NAME_JACCARD` | `0.5` | 새 스킬을 근사 중복으로 거절하는 이름 토큰 Jaccard 임계 |
+| `SIS_DUP_DESC_JACCARD` | `0.4` | 같은 판정의 설명 토큰 Jaccard 임계 |
 | `SIS_STALE_AFTER_DAYS` | `30` | 마지막 활동 후 이 일수 미사용 시 stale 마킹 |
-| `SIS_ARCHIVE_AFTER_DAYS` | `90` | 마지막 활동 후 이 일수 미사용 시 `.archive/` 로 이동 |
+| `SIS_ARCHIVE_AFTER_DAYS` | `45` | 마지막 활동 후 이 일수 미사용 시 `.archive/` 로 이동. 활동은 사용·열람·**사람이 한 패치**만이다 — 증류기 자신의 패치는 0.18.0 부터 활동으로 세지 않는다(그것을 세던 동안 매주 돌던 정리기가 15회 연속 0건을 아카이브했다) |
 | `SIS_PLUGIN_PR` | (없음) | `1` 로 설정하면 `/propose-plugin-improvement` 의 L2 자동 PR을 활성화. 미설정이면 코어 변경 L1 알림만 동작하고 PR은 만들지 않음 |
 | `SIS_RUNTIME` | (자동 판별) | `local` 이면 이 플러그인이 동작, `cowork` 이면 모든 훅이 조용히 통과 (아래 참고) |
 
@@ -140,7 +148,7 @@ install -m 600 /dev/null ~/.claude/self-improve/worker.env
 - **deny 규칙이 없습니다.** 예전에는 셸 rc 파일, `.ssh/**`, `.aws/**`, `~/.claude/settings.json`, 이 플러그인의 소스, 워커의 롤백 baseline 을 차단했습니다. deny 는 `bypassPermissions` 에서도 유효한 유일한 권한 통제였고, 그게 비었습니다. 자식은 파일시스템 어디든 쓸 수 있습니다.
 - **도구 제한이 없습니다.** 예전에는 `Read, Edit, Write, Glob, Grep` 만 허용하고 `Bash` 를 막았습니다. 이제 `Bash` 가 열려 있어, 인젝션이 성공하면 **임의 명령 실행**으로 이어집니다.
 - **프롬프트는 인젝션과 같은 채널입니다.** 위 2번의 지시는 transcript 와 같은 입력 스트림에 있습니다. 인젝션이 지시를 이기면 그 지시를 무력화한 것이므로, 채널 밖에서 막아 주는 것은 이제 없습니다.
-- 스킬 트리 밖 변조 탐지는 **watchlist 12개 파일 한정**입니다(`.claude/settings.json`·`settings.local.json`·`CLAUDE.md`, 셸 rc 6종, `.envrc`, `.npmrc`, `.gitconfig`). 전체 파일시스템 스냅샷은 불가능하고, 이제 이 watchlist 가 실질적으로 유일한 사후 신호입니다. `~/.claude.json` 은 자식이 정상 동작으로 다시 쓰기 때문에 목록에서 빠져 있는데, deny 도 없어졌으므로 그 파일은 이제 막히지도 관측되지도 않습니다.
+- **스킬 트리 밖은 관측하지 않습니다.** 0.17.0 까지는 홈의 파일 12개(`.claude/settings.json`·`settings.local.json`·`CLAUDE.md`, 셸 rc 6종, `.envrc`, `.npmrc`, `.gitconfig`)를 실행 전후로 해시해 바뀌면 작업을 막았습니다. 그런데 CLI 자체가 `~/.claude/settings.json` 을 평소 동작으로 다시 써서(`.claude.json` 과 같은 이유) 멀쩡한 증류·통합 작업이 막혔고, 0.18.0 에서 이 watchlist 를 **플러그인 소유자의 결정으로 제거**했습니다. 자식이 트리 밖에 무엇을 썼는지 알려 주는 사후 신호는 이제 없습니다 — 망가지면 사용자가 직접 확인합니다.
 - **심볼릭 링크된 스킬은 롤백 대상이 아닙니다.** 링크를 따라가면 임의 파일이 스냅샷에 딸려 들어오거나 순환이 생기므로 스냅샷은 링크에서 멈춥니다. 링크를 통한 쓰기는 되돌려지지도 위반으로 보고되지도 않습니다. 어떤 링크가 보호 밖인지는 `/distill-status` 가 호출 시점의 트리를 훑어 알려줍니다. 예전에는 링크가 하나라도 있으면 **전체 작업을 거부**했지만, 링크 하나가 라이브러리 전체의 증류를 막는 대가가 너무 컸습니다.
 - 관리형 조직이 `permissions.disableBypassPermissionsMode` 를 걸었거나 root 로 실행 중이면 백그라운드 모드는 동작하지 않고 foreground 로 폴백합니다.
 
@@ -158,6 +166,11 @@ install -m 600 /dev/null ~/.claude/self-improve/worker.env
 6. **situation-first 스킬 description.** distiller가 쓰는 SKILL.md는 방어적 "MUST ALWAYS"가 아니라 "이런 상황에 사용한다"는 상황 매칭으로 작성합니다.
 7. **모델 자발성에만 의존하지 않음.** 훅이 강제하되, 그 훅이 정확하게 동작합니다. 동시에 어떤 에러에도 fail-safe로 approve(세션을 막지 않음).
 
+그리고 0.18.0 에서 라이브러리 자체의 실패에서 배운 두 가지:
+
+8. **쓰지 않는 것이 기본이고, 새 스킬은 결정론적 게이트를 지난다.** "가까운 스킬을 패치하라"를 프롬프트로만 말하면 385개 중 근사 중복 52쌍이 생긴다. 워커가 전사와 겹치는 기존 스킬을 목록으로 건네고, 실행 뒤 가드가 유사도와 라이브러리 상한을 재어 거절한 새 스킬은 보관함으로 보낸다. 설명은 세션 목록이 실제로 보여 주는 길이(300자)까지만.
+9. **정리기는 사용·열람·사람이 한 패치만 활동으로 본다.** 쓰는 쪽(증류기)의 활동을 읽는 쪽의 사용으로 세면 증류기가 부지런할수록 정리기가 아무것도 못 지운다. 실제로 15주 동안 0건이었다.
+
 ## 한계 (정직하게)
 
 - Hermes의 **무음 데몬 스레드**는 v0.13.0 의 백그라운드 모드로 대응물이 생겼습니다 — 메인 턴에 출력도 과금도 없습니다. 다만 **무료는 아닙니다**: 별도 `claude -p` 세션이므로 구독 사용량을 소모합니다. v0.17.0 에서 **지출 상한 두 개를 모두 제거**했습니다. 둘 다 보호 장치처럼 보였지만 실제로는 반대로 동작했습니다.
@@ -170,6 +183,8 @@ install -m 600 /dev/null ~/.claude/self-improve/worker.env
 
 같은 판단으로 **모델 고정도 걷어냈습니다**(v0.17.0). 전에는 `--model sonnet` 이 박혀 있어, 사용자가 본인 작업에 어떤 티어를 쓰고 있든 증류만 조용히 다른 모델로 내려갔습니다. 증류는 사용자를 대신해 판단하는 일이라 티어 선택도 사용자 몫이어야 합니다. 이제 `--model` 을 아예 넘기지 않아 **계정이 현재 쓰는 모델을 그대로 물려받습니다** — 실측으로 Opus 5 계정에서 자식이 `claude-opus-5[1m]` 로 떴습니다(`--setting-sources ""` 는 설정 *파일* 로드를 막을 뿐, 계정의 모델 선택까지 끊지는 않습니다). 특정 티어로 고정하고 싶으면 `SIS_DISTILLER_MODEL` / `SIS_CURATE_MODEL` 을 쓰면 됩니다.
 - 증거는 **메인 transcript 만** 읽습니다. 서브에이전트 작업은 `subagents/` 하위 별도 파일이라 증류 근거에 포함되지 않습니다.
+- **스킬 트리 밖은 관측하지 않습니다**(0.18.0). 자식이 홈의 다른 파일을 건드려도 알려 주는 장치가 없습니다 — 보안 모델 절 참조.
+- 중복 판정은 **토큰 겹침**입니다. 같은 뜻을 다른 낱말로 쓴 스킬은 못 잡고, 같은 낱말을 다른 뜻으로 쓴 스킬은 잘못 잡을 수 있습니다. 후자는 잃는 것이 없습니다 — 거절된 스킬은 보관함에 남고 `/distill-status` 가 보여 줍니다.
 - 프리픽스 캐시 상속, 런타임 ContextVar 기반 provenance도 이식 불가 → frontmatter 스탬프로 근사.
 - 크로스세션 FTS5 검색(Hermes의 RECALL)은 이 플러그인 범위 밖입니다. 필요하면 `remember` 플러그인(메모리 자율 캡처)과 함께 쓰는 것을 권장.
 - **메모리 루프(MEMORY.md/USER.md)는 의도적으로 만들지 않습니다.** Hermes는 메모리(서술적 지식)와 스킬(절차적 지식)을 한 루프에 묶었지만, Claude Code는 **네이티브 `MEMORY.md` auto memory**(v2.1.59+ GA, 기본 ON)가 이미 에이전트 자율 메모리를 담당합니다. 이 플러그인은 **절차적 능력(스킬)** 축만 맡고, 사실 메모리는 네이티브에 위임 — 중복·이중 주입을 피합니다. (역할 분담: `CLAUDE.md`=정적 정책, 네이티브 `MEMORY.md`=자율 사실 메모리, `remember`=세션 요약, 이 플러그인=재사용 스킬.)
@@ -189,6 +204,11 @@ claude-code-self-improving-skills/
 │   ├── usage_store.py         # 스킬 사용 telemetry 저장소 (atomic+flock, _meta prune)
 │   ├── curator_transitions.py # 시간기반 stale→archive 상태머신 (+restore/prune, use_count 보호)
 │   ├── curator_backup.py      # 변경 전 tar.gz 스냅샷
+│   ├── skill_similarity.py    # 이름·설명 토큰 유사도, 클러스터, 압축 배치 (순수 함수, 0.18.0)
+│   ├── skill_guard.py         # 백그라운드 실행 전후 스킬 트리 스냅샷·검증·롤백 + 중복·상한 게이트
+│   ├── distill_worker.py      # 백그라운드 워커: 증류·통합·압축 잡을 claude -p 로 실행
+│   ├── distill_queue.py       # SQLite 잡 큐 (payload 에 클러스터·배치 멤버)
+│   ├── distill_cli.py         # /distill-status 뒤의 CLI (candidates 보관함 포함)
 │   ├── backup_skill.py        # PreToolUse: SKILL.md 편집 직전 백업
 │   ├── session_init.py        # 자기개선 안내 + 큐레이터 자동 실행
 │   ├── validate_skill.py      # SKILL.md 검증 + 롤백 + provenance + patch 집계
@@ -197,6 +217,7 @@ claude-code-self-improving-skills/
 ├── agents/
 │   └── skill-distiller.md     # 격리 리뷰어 (patch>create 우선순위)
 ├── tests/                     # pytest 스위트 (uv run --with pytest -- pytest tests/)
+│                              # 상태는 ~/.claude/self-improve/ (큐·백업·telemetry·candidates/)
 └── commands/
     ├── distill-skill.md       # 수동 증류 트리거
     ├── curate-skills.md       # umbrella 통합 패스 (LLM, absorbed_into 기록)

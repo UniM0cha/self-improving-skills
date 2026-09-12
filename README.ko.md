@@ -44,7 +44,7 @@ Hermes Agent는 스킬과 큐레이터 루프로 절차적 기억을 1급 시민
 - **담장 친 증류 세션**: 백그라운드 자식은 축소된 도구 셋(Bash 없음), `bypassPermissions`에서도 살아있는 deny 규칙, 잡당 예산 상한으로 돌고, 실행 후 **skill guard**가 실행 전 `~/.claude/skills` 스냅샷과 대조해 손댄 SKILL.md를 전부 검증하고 깨졌거나 범위 밖인 것은 롤백합니다. 증류는 새 스킬 생성보다 기존 스킬 패치를 우선합니다(Anthropic skill-creator 가이드).
 - **스킬 편집 안전장치**: 편집 직전 백업, 편집 후 검증, provenance 스탬프, 깨진 `SKILL.md` 자동 롤백. 비차단 품질 조언(예: 매 세션 컨텍스트 비용이 되는 과도하게 긴 description)도 제공합니다.
 - **정확한 사용량 텔레메트리**: `~/.claude/self-improve/skill_usage.json`에 스킬별 use/view/patch 집계. patch 집계는 `PostToolUse` 훅에서 수행되어 *백그라운드* 세션의 편집까지 포착하고, 큐레이션 중의 일괄 Read는 스킬의 idle 시계를 리셋하지 않습니다.
-- **큐레이터 루프**: 안 쓰는 에이전트 생성 스킬은 30일 후 stale, 90일 후 (복구 가능하게) 아카이브됩니다. 반복 사용이 입증된 스킬(`use_count >= 3`)은 절반 속도로 늙습니다. LLM 큐레이션 패스(`/curate-skills`)는 Hermes 큐레이터 프롬프트를 본뜬 umbrella-building 통합으로, 계획을 먼저 제시하고 승인 후에만 적용합니다.
+- **큐레이터 루프**: 안 쓰는 에이전트 생성 스킬은 30일 후 stale, 45일 후 (복구 가능하게) 아카이브됩니다(사용·열람·사람이 한 패치만 활동으로 셈). 반복 사용이 입증된 스킬(`use_count >= 3`)은 절반 속도로 늙습니다. LLM 큐레이션 패스(`/curate-skills`)는 Hermes 큐레이터 프롬프트를 본뜬 umbrella-building 통합으로, 계획을 먼저 제시하고 승인 후에만 적용합니다.
 - **수동 커맨드**: `/distill-skill`, `/distill-status`, `/curate-skills`, `/curator-status`, `/curator-rollback`, `/prune-skills`, `/archive-skill`, `/pin-skill`, `/restore-skill`, `/migration`, `/propose-plugin-improvement`.
 - **fail-safe 훅**: 훅 에러는 세션을 깨뜨리는 대신 원래 동작을 승인합니다.
 - **크로스 플랫폼**: macOS·Linux·Windows(Git Bash)를 3-OS CI 매트릭스로 검증 — 비한국어 Windows 로케일의 UTF-8 출력까지 포함.
@@ -104,16 +104,23 @@ codex plugin add chatgpt-codex-self-improving-skills@self-improving-skills
 |---|---:|---|
 | `SIS_REVIEW_MODE` | `background` | `background`(detached 워커, 내 턴 출력 0) / `foreground`(기존 nudge) / `off`. background는 CLI를 못 쓰면 자동으로 foreground 폴백 |
 | `SIS_CLAUDE_BIN` | 자동탐색 | `claude` 절대경로 — GUI가 띄운 훅은 PATH에 `~/.local/bin`이 없을 수 있음 |
-| `SIS_DISTILL_MAX_USD` | `0.50` | 증류 잡 1건의 `--max-budget-usd` 상한 |
-| `SIS_DISTILL_MAX_JOBS_PER_DAY` | `12` | 하루에 띄울 백그라운드 증류 세션 수 상한 |
-| `SIS_DISTILL_THRESHOLD` | `12` | 증류가 발화할 수 있는, 마지막 증류 이후 누적 도구 호출 수 |
-| `SIS_MIN_FILE_EDITS` | `2` | 마지막 증류 이후 최소 파일 편집 수 — 순수 리서치 대화의 발화를 방지 |
-| `SIS_DISTILL_READONLY_THRESHOLD` | `24` | 편집 0회 구간도 도구 호출이 이 수를 넘으면 증류 (긴 조사·디버깅의 진단 기법 캡처) |
+| `SIS_DISTILL_THRESHOLD` | `40` | 증류가 발화할 수 있는, 마지막 증류 이후 누적 도구 호출 수 (0.18.0 에서 12 → 40: 12 에서는 백그라운드 실행의 92% 가 스킬을 써 라이브러리가 하루 10개씩 늘었음) |
+| `SIS_MIN_FILE_EDITS` | `3` | 마지막 증류 이후 최소 파일 편집 수 — 순수 리서치 대화의 발화를 방지 |
+| `SIS_DISTILL_READONLY_THRESHOLD` | `80` | 편집 0회 구간도 도구 호출이 이 수를 넘으면 증류 (긴 조사·디버깅의 진단 기법 캡처) |
+| `SIS_DISTILLER_MODEL` | (없음) | 증류 자식의 모델 티어. 권장 `sonnet`. 미설정이면 계정 모델 상속. `haiku`·`fable` 은 무시 |
+| `SIS_CURATE_MODEL` | (없음) | 통합·압축 자식의 모델 티어. 권장 `opus`. `haiku`·`fable` 은 무시 |
+| `SIS_MAX_LEARNED_SKILLS` | `100` | 학습 스킬 상한. 이 수 이상이면 워커가 새 스킬 생성을 금지하고, 그래도 만들어진 것은 가드가 `~/.claude/self-improve/candidates/` 에 보관 (패치는 막지 않음) |
+| `SIS_PROMPT_NEIGHBOURS` | `15` | 증류 프롬프트에 패치 대상으로 싣는, 전사와 가장 겹치는 기존 스킬 수 |
+| `SIS_DUP_NAME_JACCARD` | `0.5` | 새 스킬을 근사 중복으로 거절하는 이름 토큰 겹침 임계 |
+| `SIS_DUP_DESC_JACCARD` | `0.4` | 같은 판정의 설명 토큰 겹침 임계 |
 | `SIS_STATE_DIR` | `~/.claude/self-improve` | 큐·백업·텔레메트리를 전부 함께 옮김 |
 | `SIS_CURATE_MIN_SKILLS` | `8` | 자동 큐레이션이 도는 최소 학습 스킬 수 |
-| `SIS_CURATE_INTERVAL_DAYS` | `7` | 자동 큐레이터 주기 |
+| `SIS_CURATE_INTERVAL_DAYS` | `7` | LLM 패스(클러스터 통합·설명 압축)의 주기 |
+| `SIS_TRANSITION_INTERVAL_DAYS` | `1` | 결정론적 stale/archive 전이의 주기 |
+| `SIS_CURATE_MAX_JOBS` | `5` | 패스당 큐에 넣는 통합 클러스터 잡 수 — 유사 스킬 클러스터마다 잡 하나라 600초 안에 끝남 |
+| `SIS_COMPRESS_MAX_JOBS` | `6` | 패스당 큐에 넣는 설명 압축 잡 수(캡 초과 스킬 20개씩, `description` 한 줄만 수정) |
 | `SIS_STALE_AFTER_DAYS` | `30` | 이 일수 미사용 시 에이전트 생성 스킬을 stale로 마킹 |
-| `SIS_ARCHIVE_AFTER_DAYS` | `90` | 이 일수 미사용 시 `.archive/`로 이동 (`use_count >= 3`인 스킬은 2배) |
+| `SIS_ARCHIVE_AFTER_DAYS` | `45` | 이 일수 미사용 시 `.archive/`로 이동 (`use_count >= 3`인 스킬은 2배). 활동은 사용·열람·사람이 한 패치뿐 — 증류기 자신의 패치는 0.18.0 부터 세지 않음 |
 | `SIS_PLUGIN_PR` | (없음) | `1`로 설정하면 이 플러그인 자체 소스에 대한 opt-in upstream PR 헬퍼 허용 |
 
 ## 동작 방식

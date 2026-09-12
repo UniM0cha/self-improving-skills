@@ -112,7 +112,7 @@ def test_home_is_re_read_on_every_call(unpinned, monkeypatch, tmp_path):
 
 # --- hook contract ----------------------------------------------------------
 
-def _work_rows(calls=12, edits=2):
+def _work_rows(calls=40, edits=3):
     rows = [tool_use("Bash", {"command": "x"}) for _ in range(calls)]
     rows += [tool_use("Edit", {"file_path": "/tmp/f{0}.py".format(i)})
              for i in range(edits)]

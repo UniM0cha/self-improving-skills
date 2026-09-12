@@ -5,12 +5,16 @@ skills (Hermes apply_automatic_transitions).
 Reads usage telemetry and moves each agent-distilled, unpinned skill through
 active -> stale -> archived based on how long since its last activity:
 
-    idle >= SIS_ARCHIVE_AFTER_DAYS (default 90)  -> archived (dir moved to .archive/)
+    idle >= SIS_ARCHIVE_AFTER_DAYS (default 45)  -> archived (dir moved to .archive/)
     idle >= SIS_STALE_AFTER_DAYS   (default 30)  -> stale
     was stale but idle < stale cutoff            -> reactivated to active
 
-"idle" = days since the most recent of last_used/viewed/patched, falling back to
-created_at (so a brand-new never-used skill ages from first-sight, not epoch).
+"idle" = days since the most recent of last_used / last_viewed /
+last_user_patched, falling back to created_at (so a brand-new never-used skill
+ages from first-sight, not epoch). A patch the DISTILLER made is deliberately
+not activity: through 0.17.0 it was, and since the distiller patches skills
+far more often than anyone uses them, 319 of 385 skills with no use or view
+ever stayed "active" and fifteen weekly runs archived nothing.
 
 NEVER touches:
   - skills with created_by != "agent" (user-authored / other plugins)
@@ -31,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 import sis_io
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import skill_paths  # noqa: E402
 import usage_store  # noqa: E402
 try:
     import curator_backup
@@ -51,10 +56,7 @@ _ARCHIVE_SUFFIX_RE = re.compile(r"^\d{8}T\d{6}Z$")
 
 
 def _int_env(name, default):
-    try:
-        return int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        return default
+    return skill_paths.int_env(name, default)
 
 
 def _now():
@@ -218,6 +220,9 @@ def mark_curated():
     except Exception:
         pass
     state["last_run"] = time.time()
+    # A manual /curate-skills is a consolidation: it resets the weekly clock
+    # the automatic pass runs on, not just the daily transition clock.
+    state["last_consolidation"] = state["last_run"]
     try:
         rc = int(state.get("run_count", 0))
     except (TypeError, ValueError):
@@ -242,9 +247,12 @@ def mark_curated():
 
 
 def _idle_days(rec, now):
-    """Days since the most recent activity (use/view/patch), else since created_at."""
+    """Days since the most recent activity (use / view / a patch by a person),
+    else since created_at. `last_patched_at` is left out on purpose: the
+    background distiller is the main author of patches, and its activity says
+    nothing about whether anyone needs the skill."""
     latest = None
-    for k in ("last_used_at", "last_viewed_at", "last_patched_at"):
+    for k in ("last_used_at", "last_viewed_at", "last_user_patched_at"):
         d = _parse(rec.get(k))
         if d and (latest is None or d > latest):
             latest = d
@@ -263,8 +271,8 @@ def _use_count(rec):
 def _archive_days_for(rec, base_days):
     """Proven skills age slower: lifetime use_count >= 3 doubles the archive
     threshold (stale marking is unchanged). Guards rarely-but-decisively used
-    skills from a fixed 90-day guillotine — the failure mode Hermes hit when
-    its curator archived the load-bearing 'plan' skill (#41817)."""
+    skills from a fixed archive-day guillotine — the failure mode Hermes hit
+    when its curator archived the load-bearing 'plan' skill (#41817)."""
     if _use_count(rec) >= 3:
         return base_days * 2
     return base_days
@@ -323,6 +331,19 @@ def archive_one(name, absorbed_into=None, dry_run=False, force=False):
     return {"name": name, "ok": True, "absorbed_into": absorbed_into}
 
 
+def _skip_reason(name, rec):
+    """Why the automatic curator must leave a skill alone: "user" (not
+    agent-distilled), "pinned", "archived" (already gone), or None. One
+    definition for run() and prune_idle(), which used to carry two copies."""
+    if rec.get("created_by", "agent") != "agent":
+        return "user"
+    if rec.get("pinned") or _frontmatter_pinned(name):
+        return "pinned"
+    if rec.get("state") == "archived":
+        return "archived"
+    return None
+
+
 def prune_idle(days, dry_run=True):
     """Bulk-archive unpinned, agent-distilled skills idle >= `days`. dry_run=True
     (default) only previews candidates — mutate nothing."""
@@ -332,11 +353,7 @@ def prune_idle(days, dry_run=True):
     candidates = []
     for name in sorted(learned):
         rec = records.get(name, {})
-        if rec.get("created_by", "agent") != "agent":
-            continue
-        if rec.get("pinned") or _frontmatter_pinned(name):
-            continue
-        if rec.get("state") == "archived":
+        if _skip_reason(name, rec) is not None:
             continue
         idle = _idle_days(rec, now)
         if idle >= days:
@@ -354,7 +371,7 @@ def prune_idle(days, dry_run=True):
 
 def run(dry_run=False):
     stale_days = _int_env("SIS_STALE_AFTER_DAYS", 30)
-    archive_days = _int_env("SIS_ARCHIVE_AFTER_DAYS", 90)
+    archive_days = _int_env("SIS_ARCHIVE_AFTER_DAYS", 45)
     now = _now()
     records = usage_store.all_records()
     learned = _learned_names()
@@ -374,14 +391,15 @@ def run(dry_run=False):
 
     for name in sorted(learned):
         rec = records.get(name, {})
-        if rec.get("created_by", "agent") != "agent":
+        skip = _skip_reason(name, rec)
+        if skip == "user":
             # only agent-distilled skills are curation-eligible
             summary["skipped_user"].append(name)
             continue
-        if rec.get("pinned") or _frontmatter_pinned(name):
+        if skip == "pinned":
             summary["skipped_pinned"].append(name)
             continue
-        if rec.get("state") == "archived":
+        if skip == "archived":
             continue
         idle = _idle_days(rec, now)
         if idle >= _archive_days_for(rec, archive_days):
@@ -457,7 +475,7 @@ if __name__ == "__main__":
         try:
             days = int(args[1])
         except ValueError:
-            days = _int_env("SIS_ARCHIVE_AFTER_DAYS", 90)
+            days = _int_env("SIS_ARCHIVE_AFTER_DAYS", 45)
         # prune is destructive: require --apply to actually mutate, else preview.
         print(json.dumps(prune_idle(days, dry_run=("--apply" not in args)), ensure_ascii=False, indent=2))
     else:

@@ -140,14 +140,82 @@ def _curate(sandbox, monkeypatch, env=None, claude="/fake/claude"):
     return lines
 
 
+def _plant_cluster(sandbox, stem="live-ui"):
+    """Two learned skills the similarity module groups into one cluster."""
+    sandbox.make_skill(stem + "-probe", PROV.format(stem + "-probe"))
+    sandbox.make_skill(stem + "-probing", PROV.format(stem + "-probing"))
+
+
 def test_the_consolidation_pass_is_queued_as_a_background_job(sandbox, monkeypatch):
+    _plant_cluster(sandbox)
     lines = _curate(sandbox, monkeypatch)
     jobs = _queue(sandbox).list_jobs()
     assert len(jobs) == 1
     assert jobs[0]["trigger"] == "curate"
     # It reads the skill library itself, so it carries no transcript.
     assert jobs[0]["transcript_path"] == ""
-    assert any("백그라운드" in line for line in lines)
+    assert jobs[0]["payload"]["members"] == ["live-ui-probe", "live-ui-probing"]
+    assert jobs[0]["session_id"] == "curator-" + jobs[0]["payload"]["id"]
+    assert any("통합 잡 1건" in line for line in lines)
+
+
+def test_each_cluster_becomes_its_own_consolidation_job(sandbox, monkeypatch):
+    _plant_cluster(sandbox, "live-ui")
+    _plant_cluster(sandbox, "remote-windows")
+    _curate(sandbox, monkeypatch)
+    jobs = _queue(sandbox).list_jobs()
+    assert sorted(j["payload"]["members"][0] for j in jobs) == ["live-ui-probe", "remote-windows-probe"]
+    assert len({j["session_id"] for j in jobs}) == 2
+
+
+def test_no_cluster_means_no_consolidation_job(sandbox, monkeypatch):
+    sandbox.make_skill("alpha-only", PROV.format("alpha-only"))
+    sandbox.make_skill("zulu-other", PROV.format("zulu-other"))
+    lines = _curate(sandbox, monkeypatch)
+    assert _queue(sandbox).list_jobs() == []
+    assert any("없습니다" in line for line in lines)
+
+
+def test_over_cap_skills_are_batched_into_compress_jobs(sandbox, monkeypatch):
+    # Three unrelated skills (distinct words, so they do not cluster) whose
+    # descriptions are all far over the cap.
+    for name in ("alpha-first", "bravo-second", "charlie-third"):
+        long_desc = (name.split("-")[0] + " ") * 80
+        sandbox.make_skill(name, PROV.format(name).replace("description: d", "description: " + long_desc))
+    monkeypatch.setenv("SIS_COMPRESS_MAX_JOBS", "1")
+    lines = _curate(sandbox, monkeypatch)
+    jobs = _queue(sandbox).list_jobs()
+    assert [j["trigger"] for j in jobs] == ["compress"]
+    assert jobs[0]["payload"] == {"kind": "batch", "id": jobs[0]["payload"]["id"],
+                                  "members": ["alpha-first", "bravo-second", "charlie-third"]}
+    assert any("압축 잡 1건" in line for line in lines)
+
+
+def test_cluster_members_are_not_compressed_before_consolidation(sandbox, monkeypatch):
+    long_desc = "x" * 400
+    for name in ("live-ui-probe", "live-ui-probing"):
+        sandbox.make_skill(name, PROV.format(name).replace("description: d", "description: " + long_desc))
+    _curate(sandbox, monkeypatch)
+    triggers = sorted(j["trigger"] for j in _queue(sandbox).list_jobs())
+    assert triggers == ["curate"]  # the cluster job only; compression waits
+
+
+def test_the_daily_transition_pass_does_not_wait_for_the_weekly_consolidation(sandbox, monkeypatch):
+    import session_init
+    importlib.reload(session_init)
+    monkeypatch.setenv("SIS_STATE_DIR", str(sandbox.home / ".claude" / "self-improve"))
+    importlib.reload(session_init)
+    import time
+    two_days_ago = time.time() - 2 * 86400
+    session_init._write_curator_state({"last_run": two_days_ago, "run_count": 3,
+                                       "last_consolidation": time.time()})
+    assert session_init._curation_status(20) == "due"          # daily clock
+    assert session_init._consolidation_status(20) == "idle"    # weekly clock just reset
+    # An install upgraded from 0.17.0 has no consolidation stamp yet: due at once.
+    session_init._write_curator_state({"last_run": time.time(), "run_count": 3})
+    assert session_init._curation_status(20) == "idle"
+    assert session_init._consolidation_status(20) == "due"
+    assert session_init._consolidation_status(3) == "idle"     # below SIS_CURATE_MIN_SKILLS
 
 
 def test_curation_can_be_turned_off(sandbox, monkeypatch):
@@ -160,6 +228,7 @@ def test_curation_can_be_turned_off(sandbox, monkeypatch):
 def test_two_session_starts_on_one_day_queue_a_single_pass(sandbox, monkeypatch):
     """Parallel session starts must not race several children over the same
     skill tree — the (session_id, prompt_id) key collapses them into one job."""
+    _plant_cluster(sandbox)
     _curate(sandbox, monkeypatch)
     _curate(sandbox, monkeypatch)
     assert len(_queue(sandbox).list_jobs()) == 1

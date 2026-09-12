@@ -67,6 +67,33 @@ def backup_dir():
     return os.path.join(state_dir(), "skill_backups")
 
 
+def int_env(name, default):
+    """An integer SIS_* knob, falling back to `default` when unset or garbage.
+
+    One definition for every consumer. The Stop hook, SessionStart and the
+    curator each used to carry a private copy; three copies of a four-line
+    function is exactly how one of them ends up parsing a knob differently.
+    """
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# Model tiers no child session or subagent of this plugin may run on: Haiku
+# hallucinates and under-works on exploration, Fable costs twice Opus. A knob
+# naming one of these is ignored and the account's own model is inherited.
+BANNED_CHILD_TIERS = ("haiku", "fable")
+
+
+def float_env(name, default):
+    """Like int_env, for the similarity thresholds."""
+    try:
+        return float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def personal_skills_root():
     return os.path.join(user_home(), ".claude", "skills")
 

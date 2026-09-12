@@ -17,6 +17,7 @@ Schema mirrors Hermes tools/skill_usage.py `_empty_record`. One JSON file:
       "<skill-name>": {
         "use_count": int, "view_count": int, "patch_count": int,
         "last_used_at": iso|null, "last_viewed_at": iso|null, "last_patched_at": iso|null,
+        "last_user_patched_at": iso|null,   # only patches a person made (0.18.0)
         "created_at": iso, "state": "active|stale|archived",
         "pinned": bool, "created_by": "agent|user", "absorbed_into": str|null
       }, ...
@@ -75,6 +76,10 @@ def empty_record(created_at=None, created_by="agent"):
         "last_used_at": None,
         "last_viewed_at": None,
         "last_patched_at": None,
+        # Set only by a patch whose created_by is "user": the curator's idle
+        # clock reads this, not last_patched_at, because the distiller's own
+        # patches are not evidence that anyone needs the skill.
+        "last_user_patched_at": None,
         "created_at": created_at or now_iso(),
         "state": "active",
         "pinned": False,
@@ -244,6 +249,8 @@ def apply_events(events, session_id=None, new_offset=None):
             count_key, ts_key = KINDS[kind]
             rec[count_key] = int(rec.get(count_key, 0)) + 1
             rec[ts_key] = ts
+            if kind == "patch" and (created_by or "") == "user":
+                rec["last_user_patched_at"] = ts
             # A stale skill that gets used again reactivates.
             if rec.get("state") == "stale":
                 rec["state"] = "active"

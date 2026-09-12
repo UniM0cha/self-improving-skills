@@ -31,9 +31,14 @@ sibling dev-log hook (which never fired across 396 real transcripts):
   * Any error fails safe to APPROVE — the hook must never wedge a session shut.
 
 Config:
-  SIS_DISTILL_THRESHOLD  tool calls since last distill required to nudge (default 12)
+  SIS_DISTILL_THRESHOLD  tool calls since last distill required to nudge (default 40)
   SIS_MIN_FILE_EDITS     min real file edits (Edit/Write/MultiEdit/NotebookEdit)
-                         since last distill, so pure read/search turns don't nudge (default 2)
+                         since last distill, so pure read/search turns don't nudge (default 3)
+  SIS_DISTILL_READONLY_THRESHOLD  edit-free segments nudge past this many calls (default 80)
+
+The 0.18.0 defaults are three to four times the originals (12 / 2 / 24): at
+those, 92% of 378 background runs wrote a skill and the library grew by ~10 a
+day. A nudge is now for a segment of work large enough to have taught something.
 """
 
 import json
@@ -45,6 +50,7 @@ from typing import NoReturn
 
 import runtime_env
 import sis_io
+import skill_paths
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
@@ -73,10 +79,7 @@ def approve() -> NoReturn:
 
 
 def _int_env(name, default):
-    try:
-        return int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        return default
+    return skill_paths.int_env(name, default)
 
 
 def _tool_uses(row):
@@ -421,8 +424,8 @@ def main():
     if not path or not os.path.isfile(path):
         approve()
 
-    threshold = _int_env("SIS_DISTILL_THRESHOLD", 12)
-    min_edits = _int_env("SIS_MIN_FILE_EDITS", 2)
+    threshold = _int_env("SIS_DISTILL_THRESHOLD", 40)
+    min_edits = _int_env("SIS_MIN_FILE_EDITS", 3)
 
     rows = []
     try:
@@ -521,7 +524,7 @@ def main():
     #       actual PR is opt-in and human-gated via /propose-plugin-improvement.
     nudge_fires = total_calls >= threshold and file_edits >= min_edits
     readonly_fires = (file_edits == 0
-                      and total_calls >= _int_env("SIS_DISTILL_READONLY_THRESHOLD", 24))
+                      and total_calls >= _int_env("SIS_DISTILL_READONLY_THRESHOLD", 80))
     # core_touched has no threshold of its own: a one-line edit to the plugin
     # source trips it. That is fine for an advisory the agent reads, but as a
     # background trigger it would spawn a session on every single turn spent
@@ -578,7 +581,7 @@ def main():
             # per-invocation model parameter beats the agent frontmatter, so no
             # file change is needed — default (unset) inherits the main model.
             model_pref = (os.environ.get("SIS_DISTILLER_MODEL") or "").strip().lower()
-            if model_pref and model_pref != "haiku":  # 정책: 서브에이전트 Haiku 금지
+            if model_pref and model_pref not in skill_paths.BANNED_CHILD_TIERS:  # 정책: Haiku·Fable 금지
                 msg += ("\n\nSIS_DISTILLER_MODEL 이 설정되어 있습니다: 서브에이전트 호출에 "
                         "model=\"{0}\" 파라미터를 포함하세요(호출 시 지정한 model 이 에이전트 "
                         "frontmatter 보다 우선합니다).".format(model_pref))

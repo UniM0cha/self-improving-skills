@@ -44,7 +44,7 @@ Hermes Agent has first-class procedural memory through skills and a curator loop
 - **Fenced distillation session**: the background child runs with a reduced tool set (no Bash), permission deny rules that survive `bypassPermissions`, a per-job budget cap, and a post-run **skill guard** that snapshots `~/.claude/skills` before the run, validates every touched `SKILL.md` after it, and rolls back anything malformed or out of scope. Distillation prefers patching existing skills over creating new ones (Anthropic skill-creator guidance).
 - **Skill edit safety**: pre-edit backups, post-edit validation, provenance stamping, and automatic rollback on malformed `SKILL.md`. Non-blocking quality advisories (e.g. over-long descriptions that cost context in every session).
 - **Accurate usage telemetry**: skill use/view/patch counts in `~/.claude/self-improve/skill_usage.json`. Patch counting runs in the `PostToolUse` hook so edits made by *background* sessions are captured too, and bulk reads during curation never reset a skill's idle clock.
-- **Curator loop**: unused agent-created skills go stale after 30 days and are archived (recoverably) after 90. Skills proven by repeated use (`use_count >= 3`) age at half speed. The LLM curation pass (`/curate-skills`) is an umbrella-building consolidation modeled on Hermes' curator prompt — plan first, apply only after approval.
+- **Curator loop**: unused agent-created skills go stale after 30 days and are archived (recoverably) after 45; a use, a view, or a patch a person made counts as activity, the distiller's own patches do not. Skills proven by repeated use (`use_count >= 3`) age at half speed. The LLM curation pass (`/curate-skills`) is an umbrella-building consolidation modeled on Hermes' curator prompt — plan first, apply only after approval.
 - **Manual commands**: `/distill-skill`, `/distill-status`, `/curate-skills`, `/curator-status`, `/curator-rollback`, `/prune-skills`, `/archive-skill`, `/pin-skill`, `/restore-skill`, `/migration`, `/propose-plugin-improvement`.
 - **Fail-safe hooks**: hook errors approve the original action instead of breaking your Claude Code session.
 - **Cross-platform**: macOS, Linux, and Windows (Git Bash), verified by a 3-OS CI matrix — including UTF-8 output on non-Korean Windows locales.
@@ -104,16 +104,23 @@ All configuration is optional. Set these in your shell or in `~/.claude/settings
 |---|---:|---|
 | `SIS_REVIEW_MODE` | `background` | `background` (detached worker, zero output in your turn) / `foreground` (classic nudge) / `off`. Background falls back to foreground automatically when the CLI cannot run |
 | `SIS_CLAUDE_BIN` | auto-detect | Absolute path to `claude`; useful when a GUI-spawned hook lacks `~/.local/bin` on PATH |
-| `SIS_DISTILL_MAX_USD` | `0.50` | `--max-budget-usd` cap per distillation job |
-| `SIS_DISTILL_MAX_JOBS_PER_DAY` | `12` | Daily cap on spawned background distillation sessions |
-| `SIS_DISTILL_THRESHOLD` | `12` | Tool-call count since the last distillation before distillation can trigger |
-| `SIS_MIN_FILE_EDITS` | `2` | Minimum file edits since the last distillation; prevents pure research chats from triggering |
-| `SIS_DISTILL_READONLY_THRESHOLD` | `24` | Edit-free segments still distill past this many tool calls (diagnostic technique from long investigations) |
+| `SIS_DISTILL_THRESHOLD` | `40` | Tool-call count since the last distillation before distillation can trigger (0.18.0: raised from 12 — at 12, 92% of background runs wrote a skill and the library grew by ~10 a day) |
+| `SIS_MIN_FILE_EDITS` | `3` | Minimum file edits since the last distillation; prevents pure research chats from triggering |
+| `SIS_DISTILL_READONLY_THRESHOLD` | `80` | Edit-free segments still distill past this many tool calls (diagnostic technique from long investigations) |
+| `SIS_DISTILLER_MODEL` | unset | Pin the distillation child to a tier; recommended `sonnet`. Unset inherits the account model. `haiku`/`fable` are ignored |
+| `SIS_CURATE_MODEL` | unset | Pin the consolidation/compression children to a tier; recommended `opus`. `haiku`/`fable` are ignored |
+| `SIS_MAX_LEARNED_SKILLS` | `100` | Library cap: at or above it the worker forbids new skills and the guard quarantines any it still writes under `~/.claude/self-improve/candidates/` (patching is never blocked) |
+| `SIS_PROMPT_NEIGHBOURS` | `15` | Existing skills most related to the transcript, listed in the distillation prompt as patch targets |
+| `SIS_DUP_NAME_JACCARD` | `0.5` | Name-token overlap above which a new skill is refused as a near-duplicate |
+| `SIS_DUP_DESC_JACCARD` | `0.4` | Description-token overlap for the same check |
 | `SIS_STATE_DIR` | `~/.claude/self-improve` | Moves the queue, backups, and telemetry together |
 | `SIS_CURATE_MIN_SKILLS` | `8` | Minimum learned-skill count before automatic curation runs |
-| `SIS_CURATE_INTERVAL_DAYS` | `7` | Automatic curator interval |
+| `SIS_CURATE_INTERVAL_DAYS` | `7` | Interval of the LLM passes (consolidation clusters, description compression) |
+| `SIS_TRANSITION_INTERVAL_DAYS` | `1` | Interval of the deterministic stale/archive transitions |
+| `SIS_CURATE_MAX_JOBS` | `5` | Consolidation cluster jobs queued per pass — one job per cluster of similar skills, so each finishes inside its 600-second clock |
+| `SIS_COMPRESS_MAX_JOBS` | `6` | Description-compression batch jobs queued per pass (20 over-cap skills each; only the `description` line may change) |
 | `SIS_STALE_AFTER_DAYS` | `30` | Mark unused agent-created skills as stale after this many inactive days |
-| `SIS_ARCHIVE_AFTER_DAYS` | `90` | Move unused agent-created skills to `.archive/` after this many inactive days (doubled for skills with `use_count >= 3`) |
+| `SIS_ARCHIVE_AFTER_DAYS` | `45` | Move unused agent-created skills to `.archive/` after this many inactive days (doubled for skills with `use_count >= 3`). Activity is a use, a view, or a patch a person made — the distiller's own patches stopped counting in 0.18.0 |
 | `SIS_PLUGIN_PR` | unset | Set to `1` to allow the opt-in upstream PR helper for this plugin's own source |
 
 ## How it works
