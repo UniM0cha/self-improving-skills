@@ -536,6 +536,8 @@ def _review_prompt(job: Dict[str, Any], transcript: str) -> str:
         "~/.agents/skills. Never write a repository-local skill.\n"
         "- If the earliest applicable review-ladder rung is repository-local, return a candidate "
         "with the proposed change instead of applying it.\n"
+        "- Before evaluating evidence, call codex_skill_list to verify the skill-manager connection. "
+        "If that call cannot succeed, return failed; do not turn missing tool access into a candidate.\n"
         "- A durable, class-level lesson backed by this evidence is required. "
         "Nothing to save is valid.\n"
         "- Return exactly the structured result requested by the output schema.\n\n"
@@ -556,6 +558,9 @@ def _child_environment(
     base: Optional[Dict[str, str]] = None, *, source_cwd: Optional[Path] = None
 ) -> Tuple[Dict[str, str], Tuple[Path, Path]]:
     env = dict(os.environ if base is None else base)
+    # A detached reviewer must not attach tools to its parent's desktop thread.
+    for key in ("CODEX_APP_TOOLS_PIPE_PATH", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+        env.pop(key, None)
     roots = _personal_skill_roots(env)
     for root in roots:
         try:
@@ -629,8 +634,16 @@ def build_codex_command(
         "shell_tool",
         "--disable",
         "unified_exec",
-        "--disable",
+        "--enable",
         "code_mode_host",
+        "-c",
+        'features.code_mode={enabled=true,excluded_tool_namespaces=["functions","web","clock","collaboration"]}',
+        "-c",
+        'web_search="disabled"',
+        "--disable",
+        "view_image",
+        "--disable",
+        "multi_agent_v2",
         "--disable",
         "apps",
         "--disable",
@@ -663,6 +676,8 @@ def build_codex_command(
         "mcp_servers.self-improving-skills.cwd=" + json.dumps(str(root)),
         "-c",
         "mcp_servers.self-improving-skills.default_tools_approval_mode=\"approve\"",
+        "-c",
+        "mcp_servers.self-improving-skills.required=true",
         "-c",
         "mcp_servers.self-improving-skills.enabled_tools="
         + json.dumps(
@@ -1182,6 +1197,26 @@ def _authentication_required(result: CommandResult) -> bool:
     return failure is not None and failure.code == "authentication_required"
 
 
+def _manager_verified(stdout: str) -> bool:
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+        result = item.get("result")
+        if (item.get("type") == "mcp_tool_call" and item.get("server") == "self-improving-skills"
+                and item.get("tool") == "codex_skill_list" and item.get("status") == "completed"
+                and not item.get("error") and isinstance(result, dict)
+                and not result.get("isError") and not result.get("is_error")):
+            return True
+    return False
+
+
 def _discard_regular_result(path: Path) -> None:
     try:
         if path.exists() and not path.is_symlink() and path.is_file():
@@ -1217,7 +1252,7 @@ def process_job(
     info = runtime or {"path": codex_bin, "version": None, "source": "override"}
     diagnostics = {"cli_path": info.get("path"), "cli_version": info.get("version"),
                    "cli_source": info.get("source"), "stage": "source",
-                   "error_code": None, "retryable": False, "transcript_relocated": False}
+                   "error_code": None, "retryable": False, "transcript_relocated": False, "manager_verified": False}
     try:
         source_path, relocated = resolve_transcript_path(
             str(job.get("transcript_path") or ""), str(job.get("session_id") or ""), base_env
@@ -1376,6 +1411,7 @@ def _execute_job_in_workspace(
             heartbeat=heartbeat,
         )
 
+    diagnostics["manager_verified"] = _manager_verified(command_result.stdout)
     failure = classify_failure(command_result.returncode, command_result.stdout, timed_out=command_result.timed_out)
     if failure is not None:
         _discard_regular_result(result_path)
@@ -1387,6 +1423,14 @@ def _execute_job_in_workspace(
             return {"job_id": job_id, "updated": updated, "status": "blocked", "reason": failure.code}
         outcome = queue.fail(job_id, owner, code=failure.code,
                              message=_error_message(command_result) if failure.code == "codex_failed" else failure.message)
+        return {"job_id": job_id, **outcome}
+    if not diagnostics["manager_verified"]:
+        _discard_regular_result(result_path)
+        diagnostics.update(stage="mcp", error_code="manager_unverified", retryable=True)
+        if not queue.set_diagnostics(job_id, owner, diagnostics):
+            return {"job_id": job_id, "updated": False, "status": "lease_lost"}
+        outcome = queue.fail(job_id, owner, code="manager_unverified",
+                             message="The required skill-manager check did not succeed")
         return {"job_id": job_id, **outcome}
     try:
         structured = _load_result(result_path, command_result.stdout)

@@ -77,9 +77,30 @@ def _error_fields(value: Any, depth: int = 0) -> tuple[set[str], set[int], list[
     return codes, statuses, messages
 
 
+def _native_runtime_failure(stdout: str) -> Optional[ReviewFailure]:
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "error":
+            continue
+        message = str(item.get("message") or "").lower()
+        if "code mode is unavailable because" in message or "code-mode host is disabled" in message:
+            return _failure("tool_runtime_unavailable", "compatibility", False,
+                            "The Codex tool execution runtime is unavailable")
+    return None
+
+
 def classify_failure(returncode: int, stdout: str, *, timed_out: bool = False) -> Optional[ReviewFailure]:
     if timed_out:
         return _failure("timeout", "execution", True, "Codex review exceeded the 600 second timeout")
+    runtime_failure = _native_runtime_failure(stdout)
+    if runtime_failure is not None:
+        return runtime_failure
     if returncode == 0:
         return None
     codes, statuses, messages = _error_fields(_terminal_error(stdout))
@@ -101,7 +122,7 @@ def classify_failure(returncode: int, stdout: str, *, timed_out: bool = False) -
         message, re.DOTALL,
     ):
         return _failure("model_unavailable", "model", False, "The requested Codex model is unavailable")
-    if codes & {"mcp_start_failed", "mcp_startup_failed"} or re.search(r"mcp.{0,80}(?:startup|start|handshake).{0,40}failed", message):
+    if codes & {"mcp_start_failed", "mcp_startup_failed"} or re.search(r"mcp.{0,100}(?:failed|could not start|startup error)", message):
         return _failure("mcp_start_failed", "mcp", True, "The skill-manager connection could not start")
     if codes & {"network_error", "connection_error", "stream_disconnected", "server_error"} or statuses & {500, 502, 503, 504} or re.search(
         r"stream disconnected|connection (?:reset|refused|closed)|network (?:error|unreachable)|error sending request", message,

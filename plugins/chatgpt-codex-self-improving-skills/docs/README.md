@@ -91,13 +91,20 @@ candidate states are reported as one short SessionStart advisory.
 
 The child uses `--ignore-user-config` and `--ignore-rules`, clears ambient MCP
 configuration, disables plugins and interactive or shell-capable built-in
-tools, and registers only this plugin's skill-manager MCP. It copies only the
+tools, and registers only this plugin's skill-manager MCP as a required server.
+The Code Mode host stays enabled because current Codex routes MCP calls through
+it. Its tool namespace exclusions remove native functions, web, clock, and
+collaboration capabilities; web search, image viewing, and both multi-agent
+features are also disabled. Parent desktop pipe/session/thread environment
+variables are removed before spawning the isolated reviewer. It copies only the
 user's default model and reasoning effort from `config.toml`; unrelated MCP,
 tool, plugin, and execution-policy settings are not inherited. Because
 `codex exec` is non-interactive, that one isolated manager is explicitly
 auto-approved with an allowlist limited to list, view, create, patch,
 support-file write, and scan operations; no other MCP server or built-in
-mutation tool is enabled.
+mutation tool is exposed through the Code Mode host. The reviewer first calls
+`codex_skill_list`; the worker requires a successful native MCP call event before
+accepting any completed result. A model's claim of success is not sufficient.
 
 Each background job starts a separate Codex run and therefore consumes
 additional tokens and account usage. Retryable execution failures are retried
@@ -111,7 +118,8 @@ Quoted conversations, tool results, model text, and ordinary stderr never decide
 whether login is required. A `401` in an old HTTP example, timestamp, or UUID
 cannot turn another failure into an authentication block. The diagnostic codes
 include `authentication_required`, `cli_upgrade_required`, `model_unavailable`,
-`rate_limited`, `network_error`, `mcp_start_failed`, `timeout`, and `codex_failed`.
+`rate_limited`, `network_error`, `mcp_start_failed`, `tool_runtime_unavailable`,
+`manager_unverified`, `timeout`, and `codex_failed`.
 Historical authentication classifications without structured diagnostics are
 shown as needing recheck, not as proof that the current login is invalid.
 
@@ -144,7 +152,8 @@ Queue records have an additive nullable `diagnostics_json` field; initialization
 migrates existing databases idempotently. Public CLI/MCP job output exposes only
 validated `diagnostics` and `authentication_classification`. Diagnostic metadata
 contains CLI path/version/source, execution stage, fixed error code, retryability,
-and archive relocation state, never raw error output or transcript contents.
+archive relocation state, and `manager_verified`, never raw error output or
+transcript contents.
 Completed and terminally failed records remain subject to the existing 30-day
 retention; pending and blocked jobs are not automatically deleted.
 

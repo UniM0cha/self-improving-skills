@@ -29,7 +29,7 @@ RETENTION_DAYS = 30
 SQLITE_SIDECAR_SUFFIXES = ("", "-wal", "-shm", "-journal")
 DIAGNOSTIC_FIELDS = frozenset({
     "cli_path", "cli_version", "cli_source", "stage", "error_code",
-    "retryable", "transcript_relocated",
+    "retryable", "transcript_relocated", "manager_verified",
 })
 
 
@@ -48,7 +48,7 @@ def sanitize_diagnostics(value: Any, *, strict: bool = False) -> Optional[Dict[s
         if key not in value:
             continue
         item = value[key]
-        if key in {"retryable", "transcript_relocated"}:
+        if key in {"retryable", "transcript_relocated", "manager_verified"}:
             valid = type(item) is bool
         elif item is None:
             valid = True

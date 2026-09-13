@@ -54,3 +54,18 @@ def test_timeout_has_priority_over_any_partial_event():
 
 def test_non_json_output_is_not_interpreted():
     assert classify_failure(1, "401 Unauthorized\nnot json").code == "codex_failed"
+
+
+def test_tool_runtime_failure_is_not_masked_by_success_exit_code():
+    warning = json.dumps({'type':'item.completed','item':{'type':'error',
+        'message':'Code Mode is unavailable because code-mode host is disabled.'}})
+    failure = classify_failure(0, warning)
+    assert failure.code == 'tool_runtime_unavailable' and failure.retryable is False
+    quote = json.dumps({'type':'item.completed','item':{'type':'agent_message',
+        'text':'Code Mode is unavailable because code-mode host is disabled.'}})
+    assert classify_failure(0, quote) is None
+
+
+def test_required_mcp_startup_failure():
+    failure=classify_failure(1,event({'message':'required MCP server self-improving-skills failed to initialize'}))
+    assert failure.code=='mcp_start_failed'
