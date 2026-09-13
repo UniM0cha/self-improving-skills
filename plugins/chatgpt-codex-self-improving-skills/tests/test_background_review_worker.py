@@ -34,7 +34,10 @@ def _fake_codex(tmp_path, body):
     path = tmp_path / "fake-codex.py"
     path.write_text("#!/usr/bin/env python3\nimport sys\n"
                     "if sys.argv[1:] == ['--version']:\n"
-                    "    print('codex-cli 0.154.0'); raise SystemExit(0)\n" + body,
+                    "    print('codex-cli 0.154.0'); raise SystemExit(0)\n"
+                    "import json, os\n"
+                    "if '--json' in sys.argv and os.environ.get('FAKE_SKIP_MANAGER_CHECK') != '1':\n"
+                    "    print(json.dumps({'type':'item.completed','item':{'type':'mcp_tool_call','server':'self-improving-skills','tool':'codex_skill_list','status':'completed','error':None,'result':{'content':[]}}}))\n" + body,
                     encoding="utf-8")
     if os.name != "nt":
         path.chmod(0o755)
@@ -266,6 +269,10 @@ print(json.dumps(result))
     assert call["saw_after"] is False
     assert "shell_environment_policy.inherit=none" in args
     assert "--json" in args
+    assert any(args[i:i+2] == ["--enable", "code_mode_host"] for i in range(len(args)-1))
+    assert 'features.code_mode={enabled=true,excluded_tool_namespaces=["functions","web","clock","collaboration"]}' in args
+    assert 'web_search="disabled"' in args
+    assert "mcp_servers.self-improving-skills.required=true" in args
     assert "--ignore-user-config" in args
     assert "--ignore-rules" in args
     assert "mcp_servers={}" in args
@@ -273,7 +280,8 @@ print(json.dumps(result))
         "plugins",
         "shell_tool",
         "unified_exec",
-        "code_mode_host",
+        "view_image",
+        "multi_agent_v2",
         "apps",
         "browser_use",
         "browser_use_external",
@@ -963,3 +971,37 @@ def test_expired_worker_cannot_block_missing_source(tmp_path):
     assert result['status'] == 'lease_lost'
     assert queue.get(job_id)['status'] == 'running'
     assert queue.get(job_id)['error_code'] is None
+
+
+def test_model_cannot_report_success_without_manager_verification(tmp_path):
+    fake = _fake_codex(tmp_path, """import json, sys
+sys.stdin.read()
+result={'status':'candidate','skills':[],'candidates':[],'summary':'could not inspect skills'}
+with open(sys.argv[sys.argv.index('--output-last-message')+1], 'w') as f: json.dump(result,f)
+""")
+    transcript = tmp_path/'thread.jsonl'
+    transcript.write_text('{}\n')
+    queue = review_queue.ReviewQueue(tmp_path/'data/jobs.sqlite3')
+    job_id = _enqueue(queue, transcript)['job_id']
+    worker.run_worker(queue, once=True, codex_bin=str(fake),
+        base_env=dict(os.environ, HOME=str(tmp_path/'home'), FAKE_SKIP_MANAGER_CHECK='1'))
+    job=queue.get(job_id)
+    assert job['status']=='pending' and job['error_code']=='manager_unverified'
+    assert job['diagnostics']['manager_verified'] is False
+    assert job['result'] is None
+
+
+def test_parent_desktop_tool_routing_is_not_inherited(tmp_path):
+    env,_=worker._child_environment({'HOME':str(tmp_path), 'CODEX_APP_TOOLS_PIPE_PATH':'parent-pipe',
+                                    'CODEX_SESSION_ID':'parent-session','CODEX_THREAD_ID':'parent-thread'})
+    assert all(key not in env for key in ('CODEX_APP_TOOLS_PIPE_PATH','CODEX_SESSION_ID','CODEX_THREAD_ID'))
+
+
+@pytest.mark.parametrize('item', [
+    {'type':'agent_message','text':'codex_skill_list completed'},
+    {'type':'mcp_tool_call','server':'other','tool':'codex_skill_list','status':'completed','result':{}},
+    {'type':'mcp_tool_call','server':'self-improving-skills','tool':'codex_skill_list','status':'failed','result':{}},
+    {'type':'mcp_tool_call','server':'self-improving-skills','tool':'codex_skill_list','status':'completed','error':None,'result':{'isError':True}},
+])
+def test_manager_verification_requires_successful_real_tool_event(item):
+    assert not worker._manager_verified(json.dumps({'type':'item.completed','item':item}))
