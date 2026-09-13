@@ -26,6 +26,9 @@ from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 from review_queue import RETENTION_DAYS, ReviewQueue, default_queue_path, validate_result
+from codex_runtime import resolve_codex_runtime
+from review_errors import classify_failure
+from review_transcript import TranscriptResolutionError, resolve_transcript_path, _check_session, _open_archive
 
 
 COMMAND_TIMEOUT_SECONDS = 600
@@ -74,17 +77,6 @@ RESULT_SCHEMA: Dict[str, Any] = {
     },
 }
 
-MODEL_UNAVAILABLE_RE = re.compile(
-    r"(?:unknown|invalid|unsupported|unavailable|not[ -]available|not found|does not exist|"
-    r"no access|access denied).{0,100}model|model.{0,100}(?:unknown|invalid|unsupported|"
-    r"unavailable|not[ -]available|not found|does not exist|no access|access denied)",
-    re.IGNORECASE | re.DOTALL,
-)
-AUTHENTICATION_RE = re.compile(
-    r"authentication required|not logged in|login required|sign[ -]in required|unauthorized|"
-    r"missing credentials|invalid credentials|(?:^|\D)401(?:\D|$)",
-    re.IGNORECASE,
-)
 
 
 class TranscriptError(RuntimeError):
@@ -251,20 +243,7 @@ def _create_windows_kill_job() -> Optional[_WindowsKillJob]:
 
 
 def discover_codex(env: Optional[Dict[str, str]] = None) -> Optional[str]:
-    values = os.environ if env is None else env
-    configured = str(values.get("CODEX_SELF_IMPROVE_CODEX_BIN") or "").strip()
-    if configured:
-        expanded = os.path.expanduser(configured)
-        if os.path.dirname(expanded):
-            candidate = os.path.abspath(expanded)
-        else:
-            candidate = shutil.which(expanded, path=values.get("PATH")) or ""
-        if candidate and os.path.isfile(candidate) and (
-            os.access(candidate, os.X_OK) or candidate.lower().endswith(".py")
-        ):
-            return candidate
-        return None
-    return shutil.which("codex", path=values.get("PATH"))
+    return resolve_codex_runtime(env).get("path")
 
 
 def _personal_skill_roots(env: Dict[str, str]) -> Tuple[Path, Path]:
@@ -422,7 +401,7 @@ def _cleanup_inactive_workspaces(queue: ReviewQueue, run_dir: Path) -> None:
             _remove_job_workspace(workspace, run_dir)
 
 
-def _read_transcript_window(path_value: str, row_cutoff: int) -> TranscriptEvidence:
+def _read_transcript_window(path_value: str, row_cutoff: int, *, expected_session_id: Optional[str] = None) -> TranscriptEvidence:
     """Read only rows at or before the captured cutoff, retaining a bounded tail."""
     if not path_value:
         raise TranscriptError("transcript path is missing")
@@ -433,7 +412,7 @@ def _read_transcript_window(path_value: str, row_cutoff: int) -> TranscriptEvide
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
-        fd = os.open(path, flags)
+        fd = _open_archive(path) if expected_session_id is not None else os.open(path, flags)
     except OSError as exc:
         raise TranscriptError(f"transcript cannot be opened: {exc.__class__.__name__}") from exc
     rows: Deque[str] = deque()
@@ -445,6 +424,9 @@ def _read_transcript_window(path_value: str, row_cutoff: int) -> TranscriptEvide
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise TranscriptError("transcript is not a regular file")
+        if expected_session_id is not None:
+            _check_session(fd, expected_session_id)
+            os.lseek(fd, 0, os.SEEK_SET)
         with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as handle:
             fd = -1
             if cutoff == 0:
@@ -693,6 +675,7 @@ def build_codex_command(
                 "codex_skill_scan",
             ]
         ),
+        "--json",
         "--color",
         "never",
         "--output-schema",
@@ -1190,15 +1173,13 @@ def _error_message(result: CommandResult) -> str:
 
 
 def _model_unavailable(result: CommandResult) -> bool:
-    return result.returncode != 0 and bool(
-        MODEL_UNAVAILABLE_RE.search(f"{result.stderr}\n{result.stdout}")
-    )
+    failure = classify_failure(result.returncode, result.stdout, timed_out=result.timed_out)
+    return failure is not None and failure.code == "model_unavailable"
 
 
 def _authentication_required(result: CommandResult) -> bool:
-    return result.returncode != 0 and bool(
-        AUTHENTICATION_RE.search(f"{result.stderr}\n{result.stdout}")
-    )
+    failure = classify_failure(result.returncode, result.stdout, timed_out=result.timed_out)
+    return failure is not None and failure.code == "authentication_required"
 
 
 def _discard_regular_result(path: Path) -> None:
@@ -1230,17 +1211,32 @@ def process_job(
     owner: str,
     codex_bin: str,
     base_env: Optional[Dict[str, str]] = None,
+    runtime: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     job_id = int(job["id"])
+    info = runtime or {"path": codex_bin, "version": None, "source": "override"}
+    diagnostics = {"cli_path": info.get("path"), "cli_version": info.get("version"),
+                   "cli_source": info.get("source"), "stage": "source",
+                   "error_code": None, "retryable": False, "transcript_relocated": False}
     try:
+        source_path, relocated = resolve_transcript_path(
+            str(job.get("transcript_path") or ""), str(job.get("session_id") or ""), base_env
+        )
+        diagnostics["transcript_relocated"] = relocated
         evidence = _read_transcript_window(
-            str(job.get("transcript_path") or ""),
-            int(job.get("transcript_rows") or 0),
+            str(source_path), int(job.get("transcript_rows") or 0),
+            expected_session_id=str(job.get("session_id") or "") if relocated else None,
         )
         transcript = evidence.text
-    except TranscriptError as exc:
-        queue.block(job_id, owner, code="unsafe_transcript", message=str(exc))
-        return {"job_id": job_id, "status": "blocked", "reason": "unsafe_transcript"}
+    except (TranscriptError, TranscriptResolutionError) as exc:
+        code = getattr(exc, "code", "unsafe_transcript")
+        diagnostics.update(stage="source", error_code=code, retryable=False)
+        if not queue.set_diagnostics(job_id, owner, diagnostics):
+            return {"job_id": job_id, "updated": False, "status": "lease_lost"}
+        queue.block(job_id, owner, code=code, message="The captured transcript is missing or could not be verified")
+        return {"job_id": job_id, "status": "blocked", "reason": code}
+    if not queue.set_diagnostics(job_id, owner, diagnostics):
+        return {"job_id": job_id, "updated": False, "status": "lease_lost"}
 
     try:
         run_dir = _secure_run_dir(queue)
@@ -1279,9 +1275,13 @@ def process_job(
                 schema_path=schema_path,
                 result_path=result_path,
                 workspace=workspace,
+                diagnostics=diagnostics,
             )
         except Exception:
             _discard_regular_result(result_path)
+            diagnostics.update(stage="execution", error_code="worker_exception", retryable=True)
+            if not queue.set_diagnostics(job_id, owner, diagnostics):
+                return {"job_id": job_id, "updated": False, "status": "lease_lost"}
             outcome = queue.fail(
                 job_id,
                 owner,
@@ -1306,6 +1306,7 @@ def _execute_job_in_workspace(
     schema_path: Path,
     result_path: Path,
     workspace: Path,
+    diagnostics: Dict[str, Any],
 ) -> Dict[str, Any]:
     job_id = int(job["id"])
     try:
@@ -1339,6 +1340,9 @@ def _execute_job_in_workspace(
         reasoning_effort=reasoning_effort,
         child_env=child_env,
     )
+    diagnostics.update(stage="execution", error_code=None, retryable=False)
+    if not queue.set_diagnostics(job_id, owner, diagnostics):
+        return {"job_id": job_id, "updated": False, "status": "lease_lost"}
     command_result = _invoke_command(
         command,
         prompt=prompt,
@@ -1350,7 +1354,7 @@ def _execute_job_in_workspace(
 
     # Only a source-model availability error earns a single retry with the
     # user's default model. The child ignores every other user setting.
-    if source_model and _model_unavailable(command_result) and time.monotonic() < deadline:
+    if source_model and default_model and source_model != default_model and _model_unavailable(command_result) and time.monotonic() < deadline:
         if not queue.mark_model_fallback_used(job_id, owner):
             _discard_regular_result(result_path)
             return {"job_id": job_id, "updated": False, "status": "lease_lost"}
@@ -1372,33 +1376,34 @@ def _execute_job_in_workspace(
             heartbeat=heartbeat,
         )
 
-    if command_result.returncode != 0:
+    failure = classify_failure(command_result.returncode, command_result.stdout, timed_out=command_result.timed_out)
+    if failure is not None:
         _discard_regular_result(result_path)
-        if _authentication_required(command_result):
-            queue.block(
-                job_id,
-                owner,
-                code="authentication_required",
-                message="Codex authentication is required",
-            )
-            return {"job_id": job_id, "updated": True, "status": "blocked"}
-        outcome = queue.fail(
-            job_id,
-            owner,
-            code="timeout" if command_result.timed_out else "codex_failed",
-            message=_error_message(command_result),
-        )
+        diagnostics.update(stage=failure.stage, error_code=failure.code, retryable=failure.retryable)
+        if not queue.set_diagnostics(job_id, owner, diagnostics):
+            return {"job_id": job_id, "updated": False, "status": "lease_lost"}
+        if not failure.retryable:
+            updated = queue.block(job_id, owner, code=failure.code, message=failure.message)
+            return {"job_id": job_id, "updated": updated, "status": "blocked", "reason": failure.code}
+        outcome = queue.fail(job_id, owner, code=failure.code,
+                             message=_error_message(command_result) if failure.code == "codex_failed" else failure.message)
         return {"job_id": job_id, **outcome}
     try:
         structured = _load_result(result_path, command_result.stdout)
     except ValueError:
         _discard_regular_result(result_path)
+        diagnostics.update(stage="result", error_code="invalid_result", retryable=True)
+        if not queue.set_diagnostics(job_id, owner, diagnostics):
+            return {"job_id": job_id, "updated": False, "status": "lease_lost"}
         outcome = queue.fail(
             job_id, owner, code="invalid_result", message="Codex returned an invalid structured result"
         )
         return {"job_id": job_id, **outcome}
     if structured["status"] == "failed":
         _discard_regular_result(result_path)
+        diagnostics.update(stage="result", error_code="review_reported_failure", retryable=True)
+        if not queue.set_diagnostics(job_id, owner, diagnostics):
+            return {"job_id": job_id, "updated": False, "status": "lease_lost"}
         outcome = queue.fail(
             job_id,
             owner,
@@ -1406,6 +1411,9 @@ def _execute_job_in_workspace(
             message="Review returned status failed",
         )
         return {"job_id": job_id, **outcome}
+    diagnostics.update(stage="complete", error_code=None, retryable=False)
+    if not queue.set_diagnostics(job_id, owner, diagnostics):
+        return {"job_id": job_id, "updated": False, "status": "lease_lost"}
     updated = queue.complete(job_id, owner, structured)
     return {
         "job_id": job_id,
@@ -1434,9 +1442,16 @@ def run_worker(
     base_env: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     environment = dict(os.environ if base_env is None else base_env)
-    executable = codex_bin or discover_codex(environment)
+    if codex_bin and str(codex_bin).endswith(".py"):
+        runtime = {"path": codex_bin, "version": None, "source": "override"}
+    else:
+        runtime_env = dict(environment)
+        if codex_bin:
+            runtime_env["CODEX_SELF_IMPROVE_CODEX_BIN"] = codex_bin
+        runtime = resolve_codex_runtime(runtime_env)
+    executable = runtime.get("path")
     if not executable:
-        return {"started": False, "reason": "codex_not_found", "processed": 0}
+        return {"started": False, "reason": runtime.get("error_code") or "codex_not_found", "processed": 0}
     owner = f"worker-{os.getpid()}-{uuid.uuid4().hex}"
     if not queue.acquire_worker_lease(owner, pid=os.getpid()):
         return {"started": False, "reason": "worker_active", "processed": 0}
@@ -1470,6 +1485,7 @@ def run_worker(
                     owner=owner,
                     codex_bin=executable,
                     base_env=environment,
+                    runtime=runtime,
                 )
             )
             processed += 1

@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 
@@ -26,6 +27,65 @@ MAX_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS: Sequence[int] = (30, 300)
 RETENTION_DAYS = 30
 SQLITE_SIDECAR_SUFFIXES = ("", "-wal", "-shm", "-journal")
+DIAGNOSTIC_FIELDS = frozenset({
+    "cli_path", "cli_version", "cli_source", "stage", "error_code",
+    "retryable", "transcript_relocated",
+})
+
+
+def sanitize_diagnostics(value: Any, *, strict: bool = False) -> Optional[Dict[str, Any]]:
+    """Accept only bounded execution metadata, never free-form child output."""
+    if value is None and not strict:
+        return None
+    if not isinstance(value, dict):
+        if strict:
+            raise ValueError("review diagnostics must be an object")
+        return None
+    if strict and set(value) - DIAGNOSTIC_FIELDS:
+        raise ValueError("review diagnostics contain unsupported fields")
+    clean: Dict[str, Any] = {}
+    for key in DIAGNOSTIC_FIELDS:
+        if key not in value:
+            continue
+        item = value[key]
+        if key in {"retryable", "transcript_relocated"}:
+            valid = type(item) is bool
+        elif item is None:
+            valid = True
+        elif key == "cli_path":
+            valid = (
+                isinstance(item, str) and len(item) <= 4096
+                and not any(ord(char) < 32 or ord(char) == 127 for char in item)
+                and (Path(item).is_absolute() or PureWindowsPath(item).is_absolute())
+            )
+        elif key == "cli_version":
+            valid = isinstance(item, str) and len(item) <= 128 and bool(
+                re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]+)?", item)
+            )
+        else:
+            valid = isinstance(item, str) and bool(re.fullmatch(r"[a-z][a-z0-9_]{0,63}", item))
+        if valid:
+            clean[key] = item
+        elif strict:
+            raise ValueError("review diagnostics contain an invalid field value")
+    return clean or None
+
+
+def _decode_diagnostics(raw: Any) -> Optional[Dict[str, Any]]:
+    try:
+        return sanitize_diagnostics(json.loads(raw)) if raw else None
+    except (TypeError, ValueError):
+        return None
+
+
+def authentication_classification(job: Dict[str, Any]) -> Optional[str]:
+    if job.get("error_code") != "authentication_required":
+        return None
+    diagnostics = sanitize_diagnostics(job.get("diagnostics")) or {}
+    return (
+        "verified" if diagnostics.get("error_code") == "authentication_required"
+        else "legacy_needs_recheck"
+    )
 
 
 def _assert_safe_sqlite_paths(path: Path) -> None:
@@ -263,6 +323,8 @@ def _as_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
             value["result"] = None
     else:
         value["result"] = None
+    value["diagnostics"] = _decode_diagnostics(value.pop("diagnostics_json", None))
+    value["authentication_classification"] = authentication_classification(value)
     value["signal"] = bool(value.get("signal"))
     value["model_fallback_used"] = bool(value.get("model_fallback_used"))
     return value
@@ -364,6 +426,7 @@ class ReviewQueue:
                     worker_pid_identity TEXT,
                     result_path TEXT,
                     result_json TEXT,
+                    diagnostics_json TEXT,
                     error_code TEXT,
                     last_error TEXT,
                     retry_delay_seconds INTEGER,
@@ -396,6 +459,8 @@ class ReviewQueue:
                 );
                 """
             )
+            # Serialize additive migrations across concurrently starting hooks.
+            conn.execute("BEGIN IMMEDIATE")
             columns = {
                 str(row["name"])
                 for row in conn.execute("PRAGMA table_info(review_jobs)").fetchall()
@@ -409,6 +474,8 @@ class ReviewQueue:
                 conn.execute(
                     "ALTER TABLE review_jobs ADD COLUMN worker_pid_identity TEXT"
                 )
+            if "diagnostics_json" not in columns:
+                conn.execute("ALTER TABLE review_jobs ADD COLUMN diagnostics_json TEXT")
             worker_columns = {
                 str(row["name"])
                 for row in conn.execute("PRAGMA table_info(review_worker_lease)").fetchall()
@@ -783,6 +850,17 @@ class ReviewQueue:
             )
             return cur.rowcount == 1
 
+    def set_diagnostics(self, job_id: int, owner: str, diagnostics: Dict[str, Any]) -> bool:
+        """Record a sanitized snapshot only while this worker owns a live lease."""
+        clean = sanitize_diagnostics(diagnostics, strict=True)
+        with self._connect() as conn:
+            cur = conn.execute(
+                """UPDATE review_jobs SET diagnostics_json=?
+                   WHERE id=? AND status='running' AND lease_owner=? AND lease_expires_at > ?""",
+                (json.dumps(clean, sort_keys=True), int(job_id), owner, _now()),
+            )
+            return cur.rowcount == 1
+
     def mark_model_fallback_used(self, job_id: int, owner: str) -> bool:
         """Persist the one allowed source-model fallback across queue retries."""
         with self._connect() as conn:
@@ -818,8 +896,8 @@ class ReviewQueue:
                    lease_owner=NULL, lease_expires_at=NULL, heartbeat_at=NULL, worker_pid=NULL,
                    worker_pid_identity=NULL,
                    error_code=NULL, last_error=NULL, retry_delay_seconds=NULL
-                   WHERE id=? AND status='running' AND lease_owner=?""",
-                (json.dumps(normalized, ensure_ascii=False), now, now, int(job_id), owner),
+                   WHERE id=? AND status='running' AND lease_owner=? AND lease_expires_at > ?""",
+                (json.dumps(normalized, ensure_ascii=False), now, now, int(job_id), owner, now),
             )
             return cur.rowcount == 1
 
@@ -828,8 +906,8 @@ class ReviewQueue:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT * FROM review_jobs WHERE id=? AND status='running' AND lease_owner=?",
-                (int(job_id), owner),
+                "SELECT * FROM review_jobs WHERE id=? AND status='running' AND lease_owner=? AND lease_expires_at > ?",
+                (int(job_id), owner, now),
             ).fetchone()
             if row is None:
                 conn.commit()
@@ -867,8 +945,8 @@ class ReviewQueue:
                 """UPDATE review_jobs SET status='blocked', error_code=?, last_error=?, completed_at=?,
                    updated_at=?, lease_owner=NULL, lease_expires_at=NULL, heartbeat_at=NULL,
                    worker_pid=NULL, worker_pid_identity=NULL
-                   WHERE id=? AND status='running' AND lease_owner=?""",
-                (str(code)[:128], str(message)[:4000], now, now, int(job_id), owner),
+                   WHERE id=? AND status='running' AND lease_owner=? AND lease_expires_at > ?""",
+                (str(code)[:128], str(message)[:4000], now, now, int(job_id), owner, now),
             )
             return cur.rowcount == 1
 
@@ -880,7 +958,7 @@ class ReviewQueue:
                    updated_at=?, error_code=NULL, last_error=NULL, retry_delay_seconds=NULL,
                    lease_owner=NULL, lease_expires_at=NULL, heartbeat_at=NULL, worker_pid=NULL,
                    worker_pid_identity=NULL,
-                   result_json=NULL, model_fallback_used=0
+                   result_json=NULL, diagnostics_json=NULL, model_fallback_used=0
                    WHERE id=? AND status IN ('failed','blocked')""",
                 (now, now, int(job_id)),
             )
@@ -902,15 +980,37 @@ class ReviewQueue:
             for row in conn.execute("SELECT status, COUNT(*) AS n FROM review_jobs GROUP BY status"):
                 counts[str(row["status"])] = int(row["n"])
             failure = conn.execute(
-                """SELECT id, error_code, last_error, updated_at FROM review_jobs
+                """SELECT id, error_code, last_error, updated_at, diagnostics_json FROM review_jobs
                    WHERE error_code IS NOT NULL ORDER BY updated_at DESC LIMIT 1"""
             ).fetchone()
+            last_execution = conn.execute(
+                """SELECT id, status, updated_at, diagnostics_json FROM review_jobs
+                   WHERE diagnostics_json IS NOT NULL ORDER BY updated_at DESC, id DESC LIMIT 1"""
+            ).fetchone()
+            attention = {key: 0 for key in (
+                "authentication_required", "legacy_authentication_classification",
+                "cli_upgrade_required", "other_failed", "other_blocked",
+            )}
+            for row in conn.execute(
+                "SELECT status, error_code, diagnostics_json FROM review_jobs WHERE status IN ('failed','blocked')"
+            ):
+                job = _as_dict(row)
+                if job["error_code"] == "cli_upgrade_required":
+                    attention["cli_upgrade_required"] += 1
+                elif job["error_code"] == "authentication_required":
+                    key = ("authentication_required" if job["authentication_classification"] == "verified"
+                           else "legacy_authentication_classification")
+                    attention[key] += 1
+                else:
+                    attention[f"other_{job['status']}"] += 1
             worker = conn.execute("SELECT * FROM review_worker_lease WHERE singleton=1").fetchone()
         return {
             "queue_path": str(self.path),
             "counts": counts,
             "worker": dict(worker) if worker is not None else None,
-            "last_failure": dict(failure) if failure is not None else None,
+            "last_failure": _as_dict(failure),
+            "last_execution": _as_dict(last_execution),
+            "attention_counts": attention,
         }
 
     def cleanup(self, *, retention_days: int = RETENTION_DAYS) -> int:

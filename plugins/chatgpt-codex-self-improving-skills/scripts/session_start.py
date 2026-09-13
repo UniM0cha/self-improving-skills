@@ -111,25 +111,29 @@ def _background_review_note(*, allow_launch: bool = True) -> str | None:
             for job in queue.list_jobs(status="pending", limit=1000)
             if now - float(job.get("created_at") or now) >= 24 * 60 * 60
         )
-        blocked_jobs = queue.list_jobs(status="blocked", limit=1000)
-        authentication_blocked = sum(
-            1
-            for job in blocked_jobs
-            if job.get("error_code") == "authentication_required"
-        )
-        other_blocked = max(
-            0, int(counts.get("blocked") or 0) - authentication_blocked
-        )
+        attention = queue_state.get("attention_counts") or {}
+        authentication_blocked = int(attention.get("authentication_required") or 0)
+        legacy_authentication = int(attention.get("legacy_authentication_classification") or 0)
+        upgrade_required = int(attention.get("cli_upgrade_required") or 0)
+        other_failed = int(attention.get("other_failed") or 0)
+        other_blocked = int(attention.get("other_blocked") or 0)
 
         alerts = []
         if candidate_count:
             alerts.append(f"{candidate_count} repository-skill candidate(s)")
-        if int(counts.get("failed") or 0):
-            alerts.append(f"{int(counts['failed'])} failed job(s)")
+        if other_failed:
+            alerts.append(f"{other_failed} failed job(s)")
+        if upgrade_required:
+            alerts.append(f"{upgrade_required} job(s) require a newer Codex CLI; update the selected runner, then retry")
         if authentication_blocked:
             alerts.append(
                 f"{authentication_blocked} job(s) waiting for Codex authentication; "
                 "sign in, then retry"
+            )
+        if legacy_authentication:
+            alerts.append(
+                f"{legacy_authentication} job(s) have a legacy authentication classification; "
+                "recheck with the current runner before deciding whether sign-in is needed"
             )
         if other_blocked:
             alerts.append(f"{other_blocked} other blocked job(s)")

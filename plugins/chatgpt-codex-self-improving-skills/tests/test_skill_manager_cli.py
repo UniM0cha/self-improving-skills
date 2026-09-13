@@ -137,7 +137,7 @@ def test_review_worker_once_does_not_fallback_when_codex_is_missing(tmp_path):
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {
         "processed": 0,
-        "reason": "codex_not_found",
+        "reason": "codex_override_invalid",
         "started": False,
     }
 
@@ -155,3 +155,14 @@ def test_review_jobs_exposes_structured_repo_candidate_without_transcript(tmp_pa
         "proposed_change": "Add the durable verification step.",
     }
     assert "private-transcript.jsonl" not in listed.stdout
+
+
+def test_cli_job_diagnostics_match_mcp_allowlist():
+    from skill_manager_cli import _sanitize_review_job as cli_sanitize
+    from skill_manager_mcp import _sanitize_review_job as mcp_sanitize
+    job = {"id": 1, "authentication_classification": "verified", "diagnostics": {
+        "cli_version": "0.154.0-alpha.6.2", "error_code": "authentication_required",
+        "retryable": False, "raw_stderr": "PRIVATE_DATA"}}
+    assert cli_sanitize(job) == mcp_sanitize(job)
+    assert cli_sanitize(job)["diagnostics"] == {
+        "cli_version": "0.154.0-alpha.6.2", "error_code": "authentication_required", "retryable": False}

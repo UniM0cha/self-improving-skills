@@ -32,7 +32,10 @@ def _enqueue(queue, transcript, *, model=None, cutoff=None):
 
 def _fake_codex(tmp_path, body):
     path = tmp_path / "fake-codex.py"
-    path.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
+    path.write_text("#!/usr/bin/env python3\nimport sys\n"
+                    "if sys.argv[1:] == ['--version']:\n"
+                    "    print('codex-cli 0.154.0'); raise SystemExit(0)\n" + body,
+                    encoding="utf-8")
     if os.name != "nt":
         path.chmod(0o755)
     return path
@@ -262,6 +265,7 @@ print(json.dumps(result))
     assert call["saw_before"] is True
     assert call["saw_after"] is False
     assert "shell_environment_policy.inherit=none" in args
+    assert "--json" in args
     assert "--ignore-user-config" in args
     assert "--ignore-rules" in args
     assert "mcp_servers={}" in args
@@ -333,7 +337,7 @@ args = sys.argv[1:]
 with open(os.environ['FAKE_CODEX_LOG'], 'a', encoding='utf-8') as handle:
     handle.write(json.dumps(args) + '\\n')
 if '--model' in args and args[args.index('--model') + 1] == 'missing-model':
-    print('model unavailable: requested model does not exist', file=sys.stderr)
+    print(json.dumps({'type': 'turn.failed', 'error': {'code': 'model_not_found', 'message': 'requested model does not exist'}}))
     raise SystemExit(2)
 result = {'status': 'nothing_to_save', 'skills': [], 'candidates': [], 'summary': 'none'}
 out = args[args.index('--output-last-message') + 1]
@@ -379,8 +383,8 @@ args = sys.argv[1:]
 with open(os.environ['FAKE_CODEX_LOG'], 'a', encoding='utf-8') as handle:
     handle.write(json.dumps(args) + '\\n')
 sys.stdin.read()
-if '--model' in args:
-    print('model unavailable: requested model does not exist', file=sys.stderr)
+if '--model' in args and args[args.index('--model') + 1] == 'missing-model':
+    print(json.dumps({'type': 'turn.failed', 'error': {'code': 'model_not_found', 'message': 'requested model does not exist'}}))
     raise SystemExit(2)
 print('default model temporary failure', file=sys.stderr)
 raise SystemExit(9)
@@ -391,18 +395,22 @@ raise SystemExit(9)
     queue = review_queue.ReviewQueue(tmp_path / "data" / "jobs.sqlite3")
     job_id = _enqueue(queue, transcript, model="missing-model")["job_id"]
     monkeypatch.setattr(review_queue, "RETRY_DELAYS_SECONDS", (0, 0))
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text('model = "default-model"\n')
 
     result = worker.run_worker(
         queue,
         once=False,
         codex_bin=str(fake),
-        base_env=dict(os.environ, HOME=str(tmp_path / "home"), FAKE_CODEX_LOG=str(log)),
+        base_env=dict(os.environ, HOME=str(tmp_path / "home"), CODEX_HOME=str(codex_home), FAKE_CODEX_LOG=str(log)),
     )
 
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     assert result["processed"] == 3
     assert len(calls) == 4
-    assert sum("--model" in args for args in calls) == 1
+    assert sum(args[args.index("--model") + 1] == "missing-model" for args in calls) == 1
+    assert all(args[args.index("--model") + 1] == "default-model" for args in calls[1:])
     assert queue.get(job_id)["status"] == "failed"
     assert queue.get(job_id)["model_fallback_used"] is True
 
@@ -415,7 +423,8 @@ def test_auth_failure_is_blocked_without_fallback_or_transcript_persistence(tmp_
 prompt = sys.stdin.read()
 with open(os.environ['FAKE_CODEX_LOG'], 'a', encoding='utf-8') as handle:
     handle.write(json.dumps(sys.argv[1:]) + '\\n')
-print('authentication required ' + ('PRIVATE_TRANSCRIPT_MARKER' if 'PRIVATE_TRANSCRIPT_MARKER' in prompt else ''), file=sys.stderr)
+print('PRIVATE_TRANSCRIPT_MARKER', file=sys.stderr)
+print(json.dumps({'type': 'turn.failed', 'error': {'status': 401, 'message': 'PRIVATE_TRANSCRIPT_MARKER'}}))
 raise SystemExit(2)
 """,
     )
@@ -864,3 +873,93 @@ def test_detached_launcher_uses_current_python_and_platform_flags(tmp_path, monk
     assert windows["creationflags"] & 0x00000008
     assert windows["creationflags"] & 0x00000200
     assert posix["start_new_session"] is True
+
+
+@pytest.mark.parametrize("failure_code,expected", [("cli_upgrade_required", "cli_upgrade_required"),
+                                                   ("model_not_found", "model_unavailable")])
+def test_nonretryable_failure_does_not_repeat_same_model_or_read_echo(tmp_path, failure_code, expected):
+    log = tmp_path / "calls.jsonl"
+    fake = _fake_codex(tmp_path, """import json, os, sys
+sys.stdin.read()
+with open(os.environ['FAKE_CODEX_LOG'], 'a') as f: f.write('call\\n')
+print('historical 401 Unauthorized timestamp .401Z', file=sys.stderr)
+print(json.dumps({'type':'turn.failed','error':{'code':os.environ['FAKE_FAILURE']}}))
+raise SystemExit(1)
+""")
+    transcript = tmp_path / "thread.jsonl"
+    transcript.write_text('{}\n')
+    home = tmp_path / 'codex-home'
+    home.mkdir()
+    (home / 'config.toml').write_text('model = "same-model"\n')
+    queue = review_queue.ReviewQueue(tmp_path / 'data/jobs.sqlite3')
+    job_id = _enqueue(queue, transcript, model='same-model')['job_id']
+    worker.run_worker(queue, once=False, codex_bin=str(fake),
+        base_env=dict(os.environ, HOME=str(tmp_path/'home'), CODEX_HOME=str(home),
+                      FAKE_CODEX_LOG=str(log), FAKE_FAILURE=failure_code))
+    job = queue.get(job_id)
+    assert job['status'] == 'blocked' and job['error_code'] == expected
+    assert job['attempts'] == 1 and job['model_fallback_used'] is False
+    assert len(log.read_text().splitlines()) == 1
+    assert job['diagnostics']['error_code'] == expected
+    assert job['diagnostics']['retryable'] is False
+
+
+def test_worker_resolves_archived_transcript_and_keeps_original_cutoff(tmp_path):
+    fake = _fake_codex(tmp_path, """import json, sys
+prompt = sys.stdin.read()
+assert 'CAPTURED' in prompt and 'AFTER_CUTOFF' not in prompt
+result = {'status':'nothing_to_save','skills':[],'candidates':[],'summary':'none'}
+with open(sys.argv[sys.argv.index('--output-last-message')+1], 'w') as f: json.dump(result,f)
+""")
+    codex_home = tmp_path / 'codex-home'
+    source = codex_home / 'sessions/rollout-source.jsonl'
+    source.parent.mkdir(parents=True)
+    source.write_text(json.dumps({'type':'session_meta','payload':{'id':'session-a'}})+'\n'
+                      +json.dumps({'role':'user','content':'CAPTURED'})+'\n')
+    queue = review_queue.ReviewQueue(tmp_path / 'data/jobs.sqlite3')
+    job_id = _enqueue(queue, source)['job_id']
+    archived = codex_home / 'archived_sessions' / source.name
+    archived.parent.mkdir()
+    source.rename(archived)
+    with archived.open('a') as f: f.write(json.dumps({'role':'user','content':'AFTER_CUTOFF'})+'\n')
+    worker.run_worker(queue, once=True, codex_bin=str(fake),
+                      base_env=dict(os.environ, HOME=str(tmp_path/'home'), CODEX_HOME=str(codex_home)))
+    job = queue.get(job_id)
+    assert job['status'] == 'done'
+    assert job['transcript_path'] == str(source)
+    assert job['diagnostics']['transcript_relocated'] is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory symlink race")
+def test_archived_final_open_rejects_parent_replacement(tmp_path):
+    home = tmp_path / "codex"
+    archive = home / "archived_sessions"
+    archive.mkdir(parents=True)
+    source = home / "sessions" / "thread.jsonl"
+    text = json.dumps({"type":"session_meta", "payload":{"id":"session-a"}}) + "\n"
+    (archive / source.name).write_text(text)
+    resolved, relocated = worker.resolve_transcript_path(str(source), "session-a", {"CODEX_HOME":str(home)})
+    assert relocated
+    replacement = tmp_path / "other"
+    replacement.mkdir()
+    (replacement / source.name).write_text(text + json.dumps({"content":"REPLACEMENT"}) + "\n")
+    archive.rename(home / "original-archive")
+    archive.symlink_to(replacement, target_is_directory=True)
+    with pytest.raises(worker.TranscriptResolutionError):
+        worker._read_transcript_window(str(resolved), 2, expected_session_id="session-a")
+
+
+def test_expired_worker_cannot_block_missing_source(tmp_path):
+    queue = review_queue.ReviewQueue(tmp_path / "data/jobs.sqlite3")
+    transcript = tmp_path / "thread.jsonl"
+    transcript.write_text('{}\n')
+    job_id = _enqueue(queue, transcript)['job_id']
+    job = queue.claim_next('expired-owner', pid=os.getpid())
+    with sqlite3.connect(queue.path) as conn:
+        conn.execute('UPDATE review_jobs SET lease_expires_at=0 WHERE id=?', (job_id,))
+    transcript.unlink()
+    result = worker.process_job(queue, job, owner='expired-owner', codex_bin=str(tmp_path/'unused'),
+                                base_env={'CODEX_HOME':str(tmp_path/'codex')})
+    assert result['status'] == 'lease_lost'
+    assert queue.get(job_id)['status'] == 'running'
+    assert queue.get(job_id)['error_code'] is None

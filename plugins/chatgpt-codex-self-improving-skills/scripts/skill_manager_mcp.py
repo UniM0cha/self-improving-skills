@@ -56,12 +56,16 @@ REVIEW_JOB_FIELDS = (
     "completed_at",
     "error_code",
     "retry_delay_seconds",
+    "authentication_classification",
 )
 
 
 def _sanitize_review_job(job: Dict[str, Any]) -> Dict[str, Any]:
-    """Hide transcript/diagnostics while exposing reviewable candidate output."""
+    """Expose only structured execution metadata and reviewable candidate output."""
+    from review_queue import sanitize_diagnostics
+
     sanitized = {field: job.get(field) for field in REVIEW_JOB_FIELDS}
+    sanitized["diagnostics"] = sanitize_diagnostics(job.get("diagnostics"))
     result = job.get("result")
     if isinstance(result, dict):
         sanitized["result_status"] = result.get("status")
