@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-codex-self-improving-skills",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "Hermes-inspired self-improvement loop for Codex skills, with non-blocking background reviews, telemetry, backups, and curator tooling.",
   "author": {
     "name": "Samton"

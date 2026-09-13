@@ -250,6 +250,9 @@ def test_session_start_reports_authentication_block_with_retry_guidance(tmp_path
         model=None,
     )["job_id"]
     queue.claim_next("auth-worker", pid=os.getpid())
+    queue.set_diagnostics(job_id, "auth-worker", {
+        "stage": "authentication", "error_code": "authentication_required", "retryable": False,
+    })
     queue.block(
         job_id,
         "auth-worker",
@@ -261,6 +264,37 @@ def test_session_start_reports_authentication_block_with_retry_guidance(tmp_path
     note = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "waiting for Codex authentication" in note
     assert "sign in, then retry" in note
+
+
+def test_legacy_authentication_classification_does_not_require_sign_in(tmp_path):
+    queue = review_queue.ReviewQueue(tmp_path / "data" / "review-jobs.sqlite3")
+    job_id = queue.enqueue(
+        session_id="legacy-session", turn_id="legacy-turn", transcript_path=str(tmp_path / "thread.jsonl"),
+        transcript_rows=1, signal=True, signal_source="last_user_message", trigger="signal", model=None,
+    )["job_id"]
+    queue.claim_next("worker")
+    queue.block(job_id, "worker", code="authentication_required", message="old classifier")
+    proc = _run_session_start(tmp_path, mode_value="off")
+    note = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "legacy authentication classification" in note
+    assert "recheck with the current runner" in note
+    assert "waiting for Codex authentication" not in note
+    assert "sign in, then retry" not in note
+
+
+def test_cli_upgrade_is_reported_separately_from_other_blocked_and_failed_jobs(tmp_path):
+    queue = review_queue.ReviewQueue(tmp_path / "data" / "review-jobs.sqlite3")
+    job_id = queue.enqueue(
+        session_id="upgrade-session", turn_id="upgrade-turn", transcript_path=str(tmp_path / "thread.jsonl"),
+        transcript_rows=1, signal=True, signal_source="last_user_message", trigger="signal", model=None,
+    )["job_id"]
+    queue.claim_next("worker")
+    queue.block(job_id, "worker", code="cli_upgrade_required", message="fixed diagnostic")
+    proc = _run_session_start(tmp_path, mode_value="off")
+    note = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "1 job(s) require a newer Codex CLI" in note
+    assert "other blocked job(s)" not in note
+    assert "failed job(s)" not in note
 
 
 def test_session_start_cleans_expired_completion_metadata_and_results(tmp_path):

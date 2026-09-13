@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
+from concurrent.futures import ThreadPoolExecutor
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
@@ -43,6 +44,88 @@ def _enqueue(
 
 def _result(status="nothing_to_save"):
     return {"status": status, "skills": [], "candidates": [], "summary": "done"}
+
+
+def test_diagnostics_migration_preserves_legacy_data_and_is_concurrently_idempotent(tmp_path):
+    queue = review_queue.ReviewQueue(tmp_path / "jobs.sqlite3")
+    job_id = _enqueue(queue)["job_id"]
+    queue.claim_next("legacy-worker")
+    queue.block(job_id, "legacy-worker", code="authentication_required", message="fixed diagnostic")
+    with sqlite3.connect(queue.path) as conn:
+        conn.execute("ALTER TABLE review_jobs DROP COLUMN diagnostics_json")
+        original = conn.execute("SELECT * FROM review_jobs").fetchone()
+        original_turns = conn.execute("SELECT * FROM review_job_turns").fetchall()
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(lambda _: review_queue.ReviewQueue(queue.path), range(8)))
+    with sqlite3.connect(queue.path) as conn:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(review_jobs)")]
+        assert columns.count("diagnostics_json") == 1
+        assert conn.execute("SELECT * FROM review_jobs").fetchone() == (*original, None)
+        assert conn.execute("SELECT * FROM review_job_turns").fetchall() == original_turns
+    job = queue.get(job_id)
+    assert job["diagnostics"] is None
+    assert job["authentication_classification"] == "legacy_needs_recheck"
+
+
+def test_diagnostics_require_current_live_job_lease_and_clear_on_manual_retry(tmp_path):
+    queue = review_queue.ReviewQueue(tmp_path / "jobs.sqlite3")
+    job_id = _enqueue(queue)["job_id"]
+    diagnostics = {"cli_path": str(tmp_path / "codex"), "cli_version": "0.154.0-alpha.6.2",
+                   "cli_source": "desktop_bundle", "stage": "authentication",
+                   "error_code": "authentication_required", "retryable": False,
+                   "transcript_relocated": True}
+    assert queue.set_diagnostics(job_id, "worker", diagnostics) is False
+    queue.claim_next("worker")
+    assert queue.set_diagnostics(job_id, "other-worker", diagnostics) is False
+    assert queue.set_diagnostics(job_id, "worker", diagnostics) is True
+    assert queue.get(job_id)["diagnostics"] == diagnostics
+    assert "diagnostics_json" not in queue.get(job_id)
+    with sqlite3.connect(queue.path) as conn:
+        conn.execute("UPDATE review_jobs SET lease_expires_at=0 WHERE id=?", (job_id,))
+    assert queue.set_diagnostics(job_id, "worker", {"stage": "complete"}) is False
+    assert queue.block(job_id, "worker", code="authentication_required", message="fixed diagnostic") is False
+    assert queue.heartbeat_job(job_id, "worker") is True
+    assert queue.block(job_id, "worker", code="authentication_required", message="fixed diagnostic") is True
+    assert queue.get(job_id)["authentication_classification"] == "verified"
+    assert queue.set_diagnostics(job_id, "worker", diagnostics) is False
+    assert queue.retry(job_id) is True
+    assert queue.get(job_id)["diagnostics"] is None
+
+
+@pytest.mark.parametrize("diagnostics", [
+    {"stdout": "SECRET_SOURCE"}, {"cli_version": "SECRET_SOURCE"},
+    {"cli_source": "path\nSECRET_SOURCE"}, {"cli_path": "relative/codex"},
+    {"stage": "execution: SECRET_SOURCE"}, {"error_code": "HTTP 401 SECRET_SOURCE"},
+    {"retryable": "false"}, {"transcript_relocated": 1},
+])
+def test_invalid_diagnostics_are_rejected_without_persistence(tmp_path, diagnostics):
+    queue = review_queue.ReviewQueue(tmp_path / "jobs.sqlite3")
+    job_id = _enqueue(queue)["job_id"]
+    queue.claim_next("worker")
+    with pytest.raises(ValueError) as error:
+        queue.set_diagnostics(job_id, "worker", diagnostics)
+    assert "SECRET_SOURCE" not in str(error.value)
+    assert queue.get(job_id)["diagnostics"] is None
+
+
+def test_corrupt_diagnostics_are_sanitized_on_read_and_attention_counts_are_exact(tmp_path):
+    queue = review_queue.ReviewQueue(tmp_path / "jobs.sqlite3")
+    for i, code in enumerate(["authentication_required", "authentication_required", "cli_upgrade_required", "unsafe_transcript"]):
+        job_id = _enqueue(queue, session=f"s-{i}")["job_id"]
+        queue.claim_next("worker")
+        if i == 1:
+            queue.set_diagnostics(job_id, "worker", {"error_code": code, "stage": "authentication"})
+        queue.block(job_id, "worker", code=code, message="fixed diagnostic")
+    with sqlite3.connect(queue.path) as conn:
+        conn.execute("UPDATE review_jobs SET diagnostics_json=? WHERE id=1", (
+            json.dumps({"stdout": "SECRET_SOURCE", "cli_version": "SECRET_SOURCE", "stage": "execution"}),))
+    first = queue.get(1)
+    assert first["diagnostics"] == {"stage": "execution"}
+    assert "SECRET_SOURCE" not in json.dumps(first)
+    assert queue.status()["attention_counts"] == {
+        "authentication_required": 1, "legacy_authentication_classification": 1,
+        "cli_upgrade_required": 1, "other_failed": 0, "other_blocked": 1,
+    }
 
 
 def test_fallback_home_skips_relative_home_for_absolute_userprofile(
@@ -352,3 +435,21 @@ def test_cleanup_keeps_pending_and_blocked_jobs(tmp_path, monkeypatch):
     assert queue.get(ids[1]) is None
     assert queue.get(ids[2])["status"] == "blocked"
     assert queue.get(ids[3])["status"] == "pending"
+
+
+@pytest.mark.parametrize("operation", ["complete", "block", "fail"])
+def test_expired_lease_cannot_commit_terminal_state(tmp_path, operation):
+    queue = review_queue.ReviewQueue(tmp_path / "jobs.sqlite3")
+    job_id = queue.enqueue(session_id='s',turn_id='t',transcript_path=str(tmp_path/'source'),
+                           transcript_rows=1, signal=False, signal_source='none', trigger='test', model=None)['job_id']
+    queue.claim_next('owner', pid=os.getpid())
+    with sqlite3.connect(queue.path) as conn:
+        conn.execute('UPDATE review_jobs SET lease_expires_at=0 WHERE id=?', (job_id,))
+    if operation == 'complete':
+        result = queue.complete(job_id, 'owner', {'status':'nothing_to_save','skills':[], 'candidates':[], 'summary':'none'})
+    elif operation == 'block':
+        result = queue.block(job_id, 'owner', code='source_missing', message='missing')
+    else:
+        result = queue.fail(job_id, 'owner', code='codex_failed', message='failed')['updated']
+    assert result is False
+    assert queue.get(job_id)['status'] == 'running'

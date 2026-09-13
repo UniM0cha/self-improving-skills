@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,54 @@ def _store(tmp_path, monkeypatch, *roots):
     import skill_store
 
     return importlib.reload(skill_store)
+
+
+def test_status_reports_selected_runtime_and_last_safe_execution(tmp_path, monkeypatch):
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    store = _store(tmp_path, monkeypatch, skills)
+    monkeypatch.setitem(sys.modules, "codex_runtime", types.SimpleNamespace(
+        resolve_codex_runtime=lambda: {
+            "path": str(tmp_path / "current-codex"), "version": "0.154.0-alpha.6.2",
+            "source": "desktop_bundle", "error_code": None, "stderr": "SECRET_SOURCE",
+        },
+    ))
+    from review_queue import ReviewQueue
+    queue = ReviewQueue()
+    job_id = queue.enqueue(
+        session_id="session", turn_id="turn", transcript_path=str(tmp_path / "private.jsonl"),
+        transcript_rows=1, signal=True, signal_source="last_user_message", trigger="signal", model="gpt-test",
+    )["job_id"]
+    queue.claim_next("worker")
+    diagnostics = {"cli_path": str(tmp_path / "old-codex"), "cli_version": "0.146.0",
+                   "cli_source": "path", "stage": "compatibility",
+                   "error_code": "cli_upgrade_required", "retryable": False}
+    queue.set_diagnostics(job_id, "worker", diagnostics)
+    queue.block(job_id, "worker", code="cli_upgrade_required", message="SECRET_SOURCE")
+    result = store.status()
+    assert result["runtime"] == {"path": str(tmp_path / "current-codex"), "version": "0.154.0-alpha.6.2",
+                                 "source": "desktop_bundle", "error_code": None}
+    assert result["last_execution"]["job_id"] == job_id
+    assert result["last_execution"]["diagnostics"] == diagnostics
+    assert result["queue"]["attention_counts"]["cli_upgrade_required"] == 1
+    assert result["last_failure"]["diagnostics"] == diagnostics
+    assert "SECRET_SOURCE" not in json.dumps(result)
+    assert "private.jsonl" not in json.dumps(result)
+
+
+def test_runtime_resolution_failure_does_not_hide_queue_status(tmp_path, monkeypatch):
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    store = _store(tmp_path, monkeypatch, skills)
+
+    def unavailable():
+        raise RuntimeError("SECRET_SOURCE")
+
+    monkeypatch.setitem(sys.modules, "codex_runtime", types.SimpleNamespace(resolve_codex_runtime=unavailable))
+    result = store.status()
+    assert result["runtime"]["error_code"] == "runtime_resolver_unavailable"
+    assert result["queue"]["available"] is True
+    assert "SECRET_SOURCE" not in json.dumps(result)
 
 
 def test_explicit_plugin_data_wins_over_installed_cache(tmp_path, monkeypatch):

@@ -84,7 +84,8 @@ The Stop hook persists a small job record in the plugin data directory and
 returns no model-visible output. A detached Python worker then runs `codex exec`
 with an ephemeral session, hooks disabled, and a workspace-write sandbox. The
 source turn's model is preferred; if that model is unavailable, the worker
-retries with the user's configured default model. Successful reviews remain
+retries once with the user's configured default model only when it is configured
+and differs from the source model. Successful reviews remain
 silent. Runner, authentication, exhausted-retry, and read-only repo-skill
 candidate states are reported as one short SessionStart advisory.
 
@@ -99,15 +100,28 @@ support-file write, and scan operations; no other MCP server or built-in
 mutation tool is enabled.
 
 Each background job starts a separate Codex run and therefore consumes
-additional tokens and account usage. A command failure is retried at most
-twice, after 30 seconds and 5 minutes, for three total attempts. Authentication
-failures remain blocked without consuming those retries; after signing in, use
-`review-retry` to make the job pending again. Each attempt has a 10-minute
-execution limit.
+additional tokens and account usage. Retryable execution failures are retried
+at most twice, after 30 seconds and 5 minutes, for three total attempts. Verified
+authentication errors, CLI upgrade requirements, and unavailable models remain
+blocked. Fix the reported condition before using `review-retry`. Each attempt
+has a 10-minute execution limit.
+
+The worker uses `codex exec --json` and classifies only error/turn.failed events.
+Quoted conversations, tool results, model text, and ordinary stderr never decide
+whether login is required. A `401` in an old HTTP example, timestamp, or UUID
+cannot turn another failure into an authentication block. The diagnostic codes
+include `authentication_required`, `cli_upgrade_required`, `model_unavailable`,
+`rate_limited`, `network_error`, `mcp_start_failed`, `timeout`, and `codex_failed`.
+Historical authentication classifications without structured diagnostics are
+shown as needing recheck, not as proof that the current login is invalid.
 
 The queue stores transcript path and an exact parsed-row cutoff, never a
-transcript copy. The worker reads a bounded window ending at that cutoff in
-memory and treats it as untrusted evidence. Child hooks and automatic review
+transcript copy. If the original is missing, the worker checks the exact basename
+under `CODEX_HOME/archived_sessions` (default `~/.codex/archived_sessions`). The
+archive must be a regular, non-symlink file with the queued session identity.
+The identity is rechecked on the opened file before reading the captured window;
+the original queue coordinates and cutoff are preserved. The worker reads a
+bounded window ending at that cutoff in memory and treats it as untrusted evidence. Child hooks and automatic review
 are disabled to prevent recursion. The worker never uses danger-full-access or
 approval bypass flags.
 
@@ -117,14 +131,22 @@ duplicate detection, but proposed changes to them are saved as candidates for
 foreground review. Before every automatic write, the existing manager backup,
 validation, scan, and read-before-write protections still apply.
 
-Use `CODEX_SELF_IMPROVE_CODEX_BIN` when the `codex` executable is not available
-on the hook process's `PATH`. Missing CLI or authentication never falls back to
-a foreground review. A missing executable leaves the durable job pending for a
-later SessionStart launch; an authentication failure remains blocked until the
-user signs in and explicitly retries it. CLI/MCP status and job commands expose
-queue state without returning transcript contents. Completed and terminally
-failed metadata and result files are retained for 30 days. Pending and blocked
-jobs are never removed automatically.
+The CLI selection order is an explicit `CODEX_SELF_IMPROVE_CODEX_BIN`, then on
+macOS the current ChatGPT/Codex desktop bundle and standard app locations, then
+PATH. Windows and Linux retain override/PATH selection. A broken explicit
+override never silently falls back. The detached worker pins the selected
+absolute path; global CLI installations and user model/login settings are not
+changed. Missing CLI leaves work pending; CLI/MCP status exposes the selection
+error and the chosen path/version/source. A CLI compatibility rejection is
+reported as `cli_upgrade_required`, not as an authentication problem.
+
+Queue records have an additive nullable `diagnostics_json` field; initialization
+migrates existing databases idempotently. Public CLI/MCP job output exposes only
+validated `diagnostics` and `authentication_classification`. Diagnostic metadata
+contains CLI path/version/source, execution stage, fixed error code, retryability,
+and archive relocation state, never raw error output or transcript contents.
+Completed and terminally failed records remain subject to the existing 30-day
+retention; pending and blocked jobs are not automatically deleted.
 
 Queue operations are available from the bundled CLI:
 
@@ -137,7 +159,8 @@ python3 scripts/skill_manager_cli.py review-worker --once
 The MCP server exposes the same operations as `codex_review_jobs`,
 `codex_review_retry`, and `codex_review_run_worker`. The main status response
 includes `review_mode`, `automatic_review`, per-state queue counts, worker
-state, and sanitized last-failure metadata. The legacy `auto_continue` field is
+state, `runtime` (current selection), `last_execution` (the last job runtime),
+and sanitized last-failure metadata. The legacy `auto_continue` field is
 deprecated and is true only in explicit `foreground` mode.
 
 State is stored in `PLUGIN_DATA` when Codex provides it. Installed MCP/CLI
@@ -170,7 +193,7 @@ Patching or overwriting an EXISTING skill file requires reading it first
 |---|---|---|
 | `CODEX_SELF_IMPROVE_MODE` | `background` | `background` queues a detached review, `foreground` uses the legacy Stop continuation, and `off` records signals without running a review; invalid values fail closed to `off` |
 | `CODEX_SELF_IMPROVE_AUTO` | (compatibility alias) | used only when MODE is unset; truthy maps to `background`, any explicit non-truthy value maps to `off` |
-| `CODEX_SELF_IMPROVE_CODEX_BIN` | PATH lookup | explicit `codex` executable used by the background worker |
+| `CODEX_SELF_IMPROVE_CODEX_BIN` | desktop bundle on macOS, then PATH | explicit `codex` executable; an invalid override is reported without fallback |
 | `CODEX_SELF_IMPROVE_INTERVAL` | `10` | tool iterations since the last review/skill-work that trigger the interval review (0 disables) |
 | `CODEX_SELF_IMPROVE_CURATE_INTERVAL_DAYS` | `7` | days between SessionStart curator nudges |
 | `CODEX_SELF_IMPROVE_CURATE_MIN_SKILLS` | `8` | tracked-skill count below which the curator nudge stays silent |

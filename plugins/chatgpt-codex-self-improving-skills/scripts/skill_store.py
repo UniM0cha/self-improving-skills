@@ -1537,10 +1537,33 @@ def status() -> Dict[str, Any]:
         "state": "unavailable",
     }
     last_failure: Optional[Dict[str, Any]] = None
+    last_execution: Optional[Dict[str, Any]] = None
+    runtime: Dict[str, Any] = {
+        "path": None, "version": None, "source": None,
+        "error_code": "runtime_resolver_unavailable",
+    }
+    try:
+        from codex_runtime import resolve_codex_runtime
+        from review_queue import sanitize_diagnostics
+
+        resolved = resolve_codex_runtime()
+        clean = sanitize_diagnostics({
+            "cli_path": resolved.get("path"),
+            "cli_version": resolved.get("version"),
+            "cli_source": resolved.get("source"),
+            "error_code": resolved.get("error_code"),
+        }) or {}
+        runtime = {
+            "path": clean.get("cli_path"), "version": clean.get("cli_version"),
+            "source": clean.get("cli_source"), "error_code": clean.get("error_code"),
+        }
+    except Exception:
+        # A missing optional resolver must not hide the existing queue status.
+        pass
     try:
         # Keep the core skill store importable in minimal/source-checkout
         # environments where the background worker files are not present yet.
-        from review_queue import JOB_STATUSES, ReviewQueue, _pid_matches_identity
+        from review_queue import JOB_STATUSES, ReviewQueue, _pid_matches_identity, sanitize_diagnostics
 
         review_status = ReviewQueue().status()
         queue_summary["available"] = True
@@ -1548,6 +1571,7 @@ def status() -> Dict[str, Any]:
             queue_summary[job_status] = int(
                 (review_status.get("counts") or {}).get(job_status, 0)
             )
+        queue_summary["attention_counts"] = dict(review_status.get("attention_counts") or {})
         worker = review_status.get("worker")
         worker_active = bool(
             worker and float(worker.get("expires_at") or 0) > time.time()
@@ -1571,6 +1595,16 @@ def status() -> Dict[str, Any]:
                 "job_id": int(failure["id"]),
                 "error_code": failure.get("error_code"),
                 "updated_at": failure.get("updated_at"),
+                "authentication_classification": failure.get("authentication_classification"),
+                "diagnostics": sanitize_diagnostics(failure.get("diagnostics")),
+            }
+        execution = review_status.get("last_execution")
+        if execution:
+            last_execution = {
+                "job_id": int(execution["id"]),
+                "status": execution.get("status"),
+                "updated_at": execution.get("updated_at"),
+                "diagnostics": sanitize_diagnostics(execution.get("diagnostics")),
             }
     except Exception as exc:
         # Status remains useful when SQLite is unavailable or a pre-0.5.0
@@ -1601,6 +1635,8 @@ def status() -> Dict[str, Any]:
         "queue": queue_summary,
         "worker": worker_summary,
         "last_failure": last_failure,
+        "last_execution": last_execution,
+        "runtime": runtime,
     }
 
 
